@@ -9,6 +9,7 @@ import asyncio
 import logging
 import math
 import os
+import random
 import shutil
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -53,46 +54,34 @@ class FFmpegRenderer:
         face_params: Optional[Dict] = None,
     ) -> Tuple[str, str, str]:
         """
-        根據 BPM 構建有機感 zoompan 表達式
+        根據 BPM 構建 XYZ 三軸統一運動的 zoompan 表達式
 
-        設計理念（參考專業紀錄片 Ken-Burns 手法）：
-        - 平移為主導（~70%），縮放為點綴（~30%）
-        - 多頻正弦疊加取代固定循環（永不重複的有機運動）
-        - 微動呼吸感（低振幅高頻擾動模擬攝影機手持質感）
+        設計理念（統一 3D 攝影機模型）：
+        - XYZ 三軸同時驅動，形成 3D Lissajous 軌跡
+        - 各軸振幅在範圍內隨機取值 → 每次渲染獨特
+        - 某軸振幅接近 0 時自然退化為雙軸或單軸運動
+        - 多頻黃金比例正弦疊加，軌跡永不重複
 
-        === 縮放 ===
-        使用慢速餘弦 + smootherstep 包絡：
-        - 週期 = 16 小節（BPM 160: 24s, BPM 120: 32s, BPM 80: 48s）
+        === Z 軸（縮放/深度） ===
+        慢速餘弦 + smootherstep 包絡：
+        - 週期 = 16 小節，振幅隨機 [0.04, 0.25] × BPM比率
         - 自然的放大→持續→縮小→靜止 波形
-        - smootherstep 壓扁過渡區，~35% 時間近乎無縮放（純平移）
 
-        === 平移 ===
+        === XY 軸（水平/垂直平移） ===
         3 層黃金比例頻率正弦疊加：
-        - 基頻 = 4 小節（從容的平移節奏），權重 60%
-        - 二次頻 = 基頻 × φ（黃金比例），權重 30%
-        - 三次頻 = 基頻 × φ²，權重 10%
-        - X 軸用 sin、Y 軸用 cos → 橢圓軌跡（非直線）
-        - 不可公約頻率比確保軌跡永不完全重複
-
-        === 縮放/平移時間分離 ===
-        平移幅度根據當前 zoom 值動態調節（pan_mod 因子）：
-        - zoom=1.0（無縮放）→ pan_mod=1.0，平移全開
-        - zoom=1+zoom_amp（最大縮放）→ pan_mod=0.25，平移退讓
-        - 確保縮放與平移不同時出現在高峰，營造節奏感
+        - 基頻 = 4 小節，權重 60% / 30% / 10%
+        - 振幅隨機 X:[0.005, 0.055] Y:[0.003, 0.038] × BPM比率
+        - X 用 sin、Y 用 cos → 橢圓軌跡
 
         === 微動 ===
         固定低頻正弦（~0.2% 畫面振幅），模擬攝影機呼吸
 
         === 抖動消除 ===
-        1. EMA 時間平滑（α=0.12）：利用 px/py 前幀座標實現一階 IIR 低通濾波
-           - 消除 pan_mod 速度突變、幀間不連續等抖動來源
-           - 時間常數 ≈ 8 幀（0.27s@30fps），保留低頻主運動（基頻衰減 <3%）
-        2. 4x 超取樣 + Lanczos：FFmpeg 內部 lrint() 捨入誤差降至 0.25px（視覺不可見）
+        1. EMA 時間平滑（α=0.12）：一階 IIR 低通濾波
+        2. 4x 超取樣 + Lanczos：捨入誤差降至 0.25px
 
         === 臉部保護 ===
-        當 face_params 不為 None 時：
-        - 平移基準從影像中心偏移到臉部中心（cx_offset, cy_offset）
-        - 平移振幅縮限到安全範圍（safe_pan_amp_x/y）
+        平移振幅鉗制到安全範圍：min(random_amp, safe_amp)
 
         Args:
             bpm: 音樂 BPM
@@ -113,32 +102,32 @@ class FFmpegRenderer:
         # 一小節 = 4 拍，時長 = 240 / BPM 秒
         bar_duration = 240.0 / bpm
 
-        # === 縮放參數 ===
-        # 週期 = 16 小節（慢速呼吸感，讓每次縮放更從容）
-        # BPM 160: 16 × 1.5s = 24s, BPM 120: 16 × 2s = 32s, BPM 80: 16 × 3s = 48s
+        # === Z 軸（縮放）參數 ===
+        # 週期 = 16 小節（慢速呼吸感）
         zoom_period_frames = 16 * bar_duration * self.fps
-        zoom_amp = 0.08 + 0.17 * clamped_ratio
+        # 振幅隨機：每次渲染獨特的縮放強度
+        zoom_amp = random.uniform(0.04, 0.25) * clamped_ratio
 
-        # === 平移參數 ===
-        # 基頻週期 = 4 小節（更從容的平移節奏）
+        # === XY 軸（平移）參數 ===
+        # 基頻週期 = 4 小節
         pan_period_frames = 4 * bar_duration * self.fps
         phi = 1.618033988749895  # 黃金比例
 
-        # 幅度隨 BPM 縮放
-        pan_amp_x = 0.02 + 0.035 * clamped_ratio   # 水平
-        pan_amp_y = 0.014 + 0.024 * clamped_ratio   # 垂直（16:9）
+        # 振幅隨機：每次渲染獨特的平移強度
+        pan_amp_x = random.uniform(0.005, 0.055) * clamped_ratio   # 水平
+        pan_amp_y = random.uniform(0.003, 0.038) * clamped_ratio   # 垂直（16:9）
 
-        # === 臉部保護：覆寫平移振幅 ===
+        # === 臉部保護：鉗制平移振幅到安全範圍 ===
         cx_offset = 0.0
         cy_offset = 0.0
         if face_params:
             cx_offset = face_params["cx_offset"]
             cy_offset = face_params["cy_offset"]
-            pan_amp_x = face_params["safe_pan_amp_x"]
-            pan_amp_y = face_params["safe_pan_amp_y"]
+            pan_amp_x = min(pan_amp_x, face_params["safe_pan_amp_x"])
+            pan_amp_y = min(pan_amp_y, face_params["safe_pan_amp_y"])
             logger.debug(
                 f"臉部保護啟用: offset=({cx_offset:.3f}, {cy_offset:.3f}), "
-                f"safe_amp=({pan_amp_x:.4f}, {pan_amp_y:.4f})"
+                f"clamped_amp=({pan_amp_x:.4f}, {pan_amp_y:.4f})"
             )
 
         # === 微動參數 ===
@@ -156,10 +145,10 @@ class FFmpegRenderer:
         phase_base = cycle_offset * 2.4
 
         logger.debug(
-            f"zoompan 參數: BPM={bpm:.0f}, ratio={bpm_ratio:.2f}, "
+            f"zoompan XYZ 參數: BPM={bpm:.0f}, ratio={bpm_ratio:.2f}, "
+            f"Z_amp={zoom_amp:.3f}, X_amp={pan_amp_x:.4f}, Y_amp={pan_amp_y:.4f}, "
             f"zoom_period={zoom_period_frames/self.fps:.1f}s, "
-            f"pan_period={pan_period_frames/self.fps:.1f}s, "
-            f"zoom_amp={zoom_amp:.3f}, pan_x={pan_amp_x:.3f}, pan_y={pan_amp_y:.3f}"
+            f"pan_period={pan_period_frames/self.fps:.1f}s"
         )
 
         # === FFmpeg 表達式構建 ===
@@ -190,18 +179,10 @@ class FFmpegRenderer:
         zs = f"(6*pow({tz},5)-15*pow({tz},4)+10*pow({tz},3))"
         z_expr = f"1.0+{zoom_amp:.4f}*{zs}"
 
-        # --- 平移抑制因子（縮放/平移時間分離）---
-        # zoom=1.0（無縮放）→ pan_mod=1.0（平移全開）
-        # zoom=1+zoom_amp（最大縮放）→ pan_mod=0.25（平移降至 25%）
-        # 確保縮放活躍時平移退讓，縮放休息時平移主導
-        z_max = 1.0 + zoom_amp
-        pan_mod = f"(0.25+0.75*({z_max:.4f}-zoom)/{zoom_amp:.4f})"
-
         # --- x: 水平平移表達式 ---
         # 3 層 sin 疊加（60% + 30% + 10%）+ 微動
-        # EMA 時間平滑取代 trunc()：px + α×(target - px)
-        # 4x 超取樣已將 FFmpeg 內部 lrint() 捨入誤差降至 0.25px（視覺不可見）
-        # 臉部偏移：加入 iw*cx_offset 常數項，將基準從畫面中心移到臉部中心
+        # XYZ 三軸統一模型：不再使用 pan_mod 抑制，三軸自由同時運動
+        # EMA 時間平滑：px + α×(target - px)
         x_pan = (
             f"0.6*sin({f1:.8f}*on+{p1:.4f})"
             f"+0.3*sin({f2:.8f}*on+{p2:.4f})"
@@ -211,7 +192,7 @@ class FFmpegRenderer:
         x_target = (
             f"(iw-iw/zoom)/2"
             f"{x_offset_term}"
-            f"+iw/zoom*({pan_mod}*{pan_amp_x:.4f}*({x_pan})"
+            f"+iw/zoom*({pan_amp_x:.4f}*({x_pan})"
             f"+{micro_amp}*sin({mf_x}*on+{mp_x:.4f}))"
         )
         x_expr = f"px+{ema_alpha}*({x_target}-px)"
@@ -227,7 +208,7 @@ class FFmpegRenderer:
         y_target = (
             f"(ih-ih/zoom)/2"
             f"{y_offset_term}"
-            f"+ih/zoom*({pan_mod}*{pan_amp_y:.4f}*({y_pan})"
+            f"+ih/zoom*({pan_amp_y:.4f}*({y_pan})"
             f"+{micro_amp}*sin({mf_y}*on+{mp_y:.4f}))"
         )
         y_expr = f"py+{ema_alpha}*({y_target}-py)"
