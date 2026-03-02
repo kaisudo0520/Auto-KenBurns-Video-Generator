@@ -1,8 +1,8 @@
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onUnmounted, type Ref } from 'vue'
 import wsService from '@/services/websocket'
 import type { WSConnectionState, WSProgressMessage, WSStatusMessage, WSErrorMessage, WSCompleteMessage } from '@/types'
 
-export function useWebSocket(jobId: ref<string | null>) {
+export function useWebSocket(_jobId: Ref<string | null>) {
   const connectionState = ref<WSConnectionState>('disconnected')
   const error = ref<string | null>(null)
 

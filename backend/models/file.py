@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Column, String, Integer, DateTime, Enum as SQLEnum
+from sqlalchemy import Column, String, Integer, Float, DateTime, Enum as SQLEnum
 from sqlalchemy.orm import relationship
 
 from backend.database.connection import Base
@@ -78,9 +78,9 @@ class File(Base):
     height = Column(Integer, nullable=True)
 
     # Audio specific (nullable for image)
-    duration = Column(Integer, nullable=True)  # seconds
+    duration = Column(Float, nullable=True)  # seconds
     sample_rate = Column(Integer, nullable=True)  # Hz
-    loudness = Column(Integer, nullable=True)  # LUFS
+    loudness = Column(Float, nullable=True)  # LUFS
 
     # Status
     status = Column(

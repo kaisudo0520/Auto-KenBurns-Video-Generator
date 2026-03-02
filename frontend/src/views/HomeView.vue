@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useRenderStore } from '@/stores/renderStore'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
@@ -10,22 +10,17 @@ const router = useRouter()
 const renderStore = useRenderStore()
 
 const images = ref<File[]>([])
-const audio = ref<File | null>(null)
+const audios = ref<File[]>([])
 const imagePreviews = ref<string[]>([])
-const audioName = ref<string>('')
 const isRendering = ref(false)
 const renderError = ref<string | null>(null)
 
-// 計算總時長
-const totalDuration = computed(() => {
-  let total = 0
-  if (audio.value) {
-    // 有音樂時使用音樂時長
-    return '根據音樂計算'
-  }
-  // 沒有音樂時使用圖片數量 * 5秒
-  return `${images.value.length * 5} 秒`
-})
+// 格式化檔案大小
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
 
 function handleImagesSelected(files: File[]) {
   images.value = [...images.value, ...files]
@@ -45,14 +40,12 @@ function handleImageRemove(index: number) {
   imagePreviews.value.splice(index, 1)
 }
 
-function handleAudioSelected(file: File) {
-  audio.value = file
-  audioName.value = file.name
+function handleAudiosSelected(files: File[]) {
+  audios.value = [...audios.value, ...files]
 }
 
-function handleAudioRemove() {
-  audio.value = null
-  audioName.value = ''
+function handleAudioRemove(index: number) {
+  audios.value.splice(index, 1)
 }
 
 async function startRender() {
@@ -64,8 +57,11 @@ async function startRender() {
   isRendering.value = true
   renderError.value = null
 
+  // 清除前次渲染狀態
+  renderStore.clearRender()
+
   try {
-    const result = await renderStore.quickRender(images.value, audio.value)
+    const result = await renderStore.quickRender(images.value, audios.value)
 
     // 連接 WebSocket
     renderStore.connectProgressWS(result.job_id)
@@ -83,8 +79,7 @@ async function startRender() {
 function clearAll() {
   images.value = []
   imagePreviews.value = []
-  audio.value = null
-  audioName.value = ''
+  audios.value = []
   renderError.value = null
 }
 </script>
@@ -148,20 +143,28 @@ function clearAll() {
         <div class="flex items-center gap-3 mb-4">
           <div class="w-1 h-6 rounded-full bg-gradient-to-b from-accent-fuchsia to-accent-cyan"></div>
           <h2 class="text-xl font-bold font-display text-white">音樂（可選）</h2>
+          <span v-if="audios.length > 0" class="text-zinc-500 text-sm">({{ audios.length }} 首)</span>
         </div>
 
-        <!-- 已選擇的音樂 -->
-        <div v-if="audio" class="mb-4">
-          <div class="flex items-center justify-between p-4 rounded-lg bg-bg-secondary border border-zinc-700/50">
-            <div class="flex items-center gap-3">
-              <div class="w-10 h-10 rounded-lg bg-accent-fuchsia/20 flex items-center justify-center">
+        <!-- 已選擇的音樂列表 -->
+        <div v-if="audios.length > 0" class="space-y-2 mb-4">
+          <div
+            v-for="(audioFile, index) in audios"
+            :key="index"
+            class="flex items-center justify-between p-4 rounded-lg bg-bg-secondary border border-zinc-700/50"
+          >
+            <div class="flex items-center gap-3 min-w-0">
+              <div class="w-10 h-10 shrink-0 rounded-lg bg-accent-fuchsia/20 flex items-center justify-center">
                 <svg class="w-5 h-5 text-accent-fuchsia" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
                 </svg>
               </div>
-              <span class="text-white">{{ audioName }}</span>
+              <div class="min-w-0">
+                <p class="text-white truncate">{{ audioFile.name }}</p>
+                <p class="text-zinc-500 text-xs">{{ formatFileSize(audioFile.size) }}</p>
+              </div>
             </div>
-            <button @click="handleAudioRemove" class="text-zinc-400 hover:text-white transition-colors">
+            <button @click="handleAudioRemove(index)" class="shrink-0 ml-3 text-zinc-400 hover:text-white transition-colors">
               <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
               </svg>
@@ -169,8 +172,8 @@ function clearAll() {
           </div>
         </div>
 
-        <!-- 上傳按鈕 -->
-        <AudioUploader @upload="handleAudioSelected" v-if="!audio" />
+        <!-- 上傳按鈕（始終顯示，可累積添加） -->
+        <AudioUploader @upload="handleAudiosSelected" />
       </div>
 
       <!-- 錯誤訊息 -->
@@ -183,7 +186,7 @@ function clearAll() {
         <button
           @click="clearAll"
           class="btn-secondary flex-1"
-          :disabled="isRendering || (images.length === 0 && !audio)"
+          :disabled="isRendering || (images.length === 0 && audios.length === 0)"
         >
           清除全部
         </button>
@@ -203,7 +206,7 @@ function clearAll() {
 
       <!-- 提示文字 -->
       <p class="text-zinc-500 text-sm text-center mt-4">
-        <template v-if="audio">
+        <template v-if="audios.length > 0">
           圖片將根據音樂時長自動分配顯示時間
         </template>
         <template v-else-if="images.length > 0">

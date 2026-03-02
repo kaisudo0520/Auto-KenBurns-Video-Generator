@@ -1,12 +1,9 @@
 <script setup lang="ts">
-import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import type { ProjectListItem } from '@/types'
-import { useProjectStore } from '@/stores/projectStore'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 
 const router = useRouter()
-const projectStore = useProjectStore()
 
 const props = defineProps<{
   projects: ProjectListItem[]

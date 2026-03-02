@@ -7,6 +7,7 @@ const props = defineProps<{
   progress: RenderProgress | null
   status: string
   eta?: number
+  elapsed?: number
 }>()
 
 const emit = defineEmits<{
@@ -26,6 +27,13 @@ const formattedEta = computed(() => {
   if (!props.eta || props.eta <= 0) return '--'
   const mins = Math.floor(props.eta / 60)
   const secs = props.eta % 60
+  return `${mins}:${secs.toString().padStart(2, '0')}`
+})
+
+const formattedElapsed = computed(() => {
+  if (!props.elapsed || props.elapsed <= 0) return '0:00'
+  const mins = Math.floor(props.elapsed / 60)
+  const secs = props.elapsed % 60
   return `${mins}:${secs.toString().padStart(2, '0')}`
 })
 
@@ -115,7 +123,11 @@ const statusColor = computed(() => {
     </div>
 
     <!-- Stats -->
-    <div class="grid grid-cols-3 gap-3">
+    <div class="grid grid-cols-4 gap-3">
+      <div class="bg-bg-tertiary/50 rounded-lg py-3 text-center">
+        <p class="text-zinc-500 text-xs mb-1">已耗時</p>
+        <p class="text-white font-medium font-mono text-sm">{{ formattedElapsed }}</p>
+      </div>
       <div class="bg-bg-tertiary/50 rounded-lg py-3 text-center">
         <p class="text-zinc-500 text-xs mb-1">幀數</p>
         <p class="text-white font-medium font-mono text-sm">{{ currentFrame.toLocaleString() }} <span class="text-zinc-600">/</span> {{ totalFrames.toLocaleString() }}</p>

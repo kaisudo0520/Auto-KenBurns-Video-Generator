@@ -118,14 +118,45 @@ npm run test
 
 ## Important Design Notes
 
+### FFmpeg 渲染管線
+
+渲染流程由三個服務協作：
+
+1. **`kenburns_service.py`** — BPM 分析（Librosa）
+2. **`ffmpeg_renderer.py`** — FFmpeg 命令構建、zoompan 表達式生成、非同步執行與進度追蹤
+3. **`render_service.py`** — 渲染任務協調（階段管理、WebSocket 進度廣播、取消處理）
+
+渲染階段：`LOADING_IMAGES → PROCESSING_AUDIO → GENERATING_PATHS → ENCODING_VIDEO → FINALIZING`
+
+FFmpeg 使用 `zoompan` 濾鏡搭配 BPM 驅動的序列式表達式產生 Ken-Burns 效果：
+
+**4 步子循環**：`放大 → 平移出 → 平移回中心 → 縮小`（不斷重複）
+- 每個動作 = 2 小節（bar_duration = 240/BPM 秒）
+- 方向由黃金角序列決定（137.5°，半隨機、均勻覆蓋 360°）
+- Smootherstep 緩動：`6t⁵ - 15t⁴ + 10t³`（速度和加速度邊界為零）
+
+**抖動消除三層防護**：
+1. 動作順序設計：平移時 zoom 恆定，縮放時在中心（無座標漂移）
+2. `trunc()` 包裹 x/y 座標（一致的整數截斷方向）
+3. 4x 超取樣 + Lanczos 縮放（捨入誤差降至 0.25px，參考 FFmpeg Trac #4298）
+
+**BPM 驅動的縮放幅度**（柔和範圍）：
+- `z` (zoom): `1.0 + amplitude`，amplitude 由 BPM 決定
+- `x`, `y` (pan): `trunc(center + visible_size * amp * cos/sin(golden_angle))`
+- 多音訊使用 `concat` 濾鏡串接
+
+編碼器自動偵測：優先使用 `h264_nvenc` (NVENC GPU)，fallback 至 `libx264`。
+進度追蹤：FFmpeg `-progress pipe:1` 解析 `out_time_us`。
+取消支援：`_active_renderers` 全域字典追蹤 FFmpeg 進程，取消時呼叫 `terminate()`。
+
 ### Ken-Burns Effect (BPM-Driven)
 
-The system automatically generates continuous Ken-Burns effects based on music BPM analysis:
-- Low BPM (<80): Slow, elongated movements (1.5-3 seconds per action)
-- Medium BPM (80-140): Standard movements (1-2 seconds)
-- High BPM (>140): Fast dynamic movements (0.5-1 second)
+BPM 驅動的縮放幅度（柔和範圍，避免晃動感）：
+- Low BPM (<80): amplitude=0.15, 最大放大至 1.15x
+- Medium BPM (80-140): amplitude=0.20, 最大放大至 1.20x
+- High BPM (>140): amplitude=0.28, 最大放大至 1.28x
 
-Effects automatically switch between: zoom in/out, pan left/right/up/down, diagonal movements, rotation. Each image has fade-in/fade-out transitions.
+平移幅度：水平 5%（pan_amp_x=0.05）、垂直 3.5%（pan_amp_y=0.035，16:9 考量）
 
 ### Anime Character Protection
 
@@ -134,22 +165,29 @@ The Ken-Burns service (`backend/services/kenburns_service.py`) includes subject 
 ### API Endpoints
 
 All API routes are prefixed with `/api/v1/`:
+- `POST /api/v1/quick-render` - 快速渲染（上傳圖片+音樂直接渲染）
+- `GET /api/v1/render/status/{job_id}` - 渲染狀態查詢
+- `POST /api/v1/render/cancel/{job_id}` - 取消渲染
+- `POST /api/v1/render/open-folder/{job_id}` - 開啟輸出資料夾
 - `/api/v1/upload/*` - File upload (images/audio)
 - `/api/v1/projects/*` - Project CRUD
-- `/api/v1/render/*` - Rendering control
 - `/api/v1/settings/*` - System settings
 - `/ws/render/{job_id}` - WebSocket for real-time progress
 
 ## Multi-Agent Framework
 
-This project uses Claude Code's multi-agent collaboration:
-- **Coder-PM** - Project manager, coordinates tasks
-- **Coder-Plan** - Technical architect, writes specifications
-- **Coder-Backend** - Backend developer (business logic)
-- **Coder-Bridge** - API designer (front-end/back-end communication)
-- **Coder-Database** - Database expert
-- **Coder-Frontend** - Frontend developer (uses frontend-design skill)
-- **Coder-Test** - Test engineer
-- **Coder-Review** - Code review
+本專案使用 Claude Code 的多 Agent 協作框架：
 
-Usage: `Use the coder-pm agent to build [feature description]`
+| Agent | 角色 | 職責 |
+|-------|------|------|
+| **Coder-PM** | 專案經理 | 需求分析、任務分派、協調各 Agent 協作 |
+| **Coder-Plan** | 技術架構師 | 撰寫規格書、技術方案設計 |
+| **Coder-Backend** | 後端開發者 | FastAPI 路由、服務層、FFmpeg 整合 |
+| **Coder-Bridge** | API 設計師 | 前後端介面規格、型別同步 |
+| **Coder-Database** | 資料庫專家 | 資料模型設計、Alembic 遷移、查詢優化 |
+| **Coder-Frontend** | 前端開發者 | Vue 3 元件、頁面、狀態管理（使用 frontend-design skill） |
+| **Coder-Test** | 測試工程師 | pytest / vitest 測試撰寫與執行 |
+| **Coder-Review** | 程式碼審查 | 品質檢查、安全審查、效能建議 |
+| **Coder-Debug** | 除錯專家 | 錯誤排查、日誌分析、效能瓶頸定位 |
+
+使用方式：`Use the coder-pm agent to build [feature description]`

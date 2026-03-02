@@ -6,6 +6,8 @@ Handles render job operations including start, cancel, status, and download.
 
 import logging
 import os
+import subprocess
+import sys
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -115,27 +117,27 @@ async def start_render(
     render_service = RenderService(db)
     job = await render_service.create_render_job(project)
 
-    # 如果项目有音频，根据音频长度自动计算每张图片的显示时长
+    # 如果專案有音訊，根據音訊長度自動計算每張圖片的顯示時長
     audio_duration = 0.0
     if project.audio_tracks and len(project.audio_tracks) > 0:
-        # 获取第一个音频文件的时长
+        # 取得第一個音訊檔案的時長
         audio_file = project.audio_tracks[0].file
         if audio_file and audio_file.duration:
             audio_duration = float(audio_file.duration)
 
-    # 根据是否有音频来计算总时长
+    # 根據是否有音訊來計算總時長
     if audio_duration > 0 and project.images:
-        # 根据音频长度和图片数量计算每张图片的显示时长
+        # 根據音訊長度和圖片數量計算每張圖片的顯示時長
         image_count = len(project.images)
-        # 每张图片的显示时长 = 音频总时长 / 图片数量
+        # 每張圖片的顯示時長 = 音訊總時長 / 圖片數量
         per_image_duration = audio_duration / image_count
 
-        # 更新每张图片的显示时长
+        # 更新每張圖片的顯示時長
         for img in project.images:
             img.duration = per_image_duration
         total_duration = audio_duration
     else:
-        # 没有音频时使用图片的默认时长
+        # 沒有音訊時使用圖片的預設時長
         total_duration = sum(img.duration for img in project.images)
 
     # Start render in background (simulated for now)
@@ -374,3 +376,56 @@ async def download_render(
         filename=filename,
         media_type="video/mp4",
     )
+
+
+@router.post("/render/open-folder/{job_id}")
+async def open_output_folder(
+    job_id: str,
+    db: Session = Depends(deps.get_db),
+):
+    """
+    在檔案總管中開啟渲染輸出的資料夾。
+    """
+    job = db.query(RenderJobModel).filter(RenderJobModel.id == job_id).first()
+
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "JOB_NOT_FOUND", "message": "任務不存在"},
+        )
+
+    if not job.output_path:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "NO_OUTPUT", "message": "尚無輸出檔案"},
+        )
+
+    abs_path = os.path.abspath(job.output_path)
+    folder = os.path.dirname(abs_path)
+
+    if not os.path.isdir(folder):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "FOLDER_NOT_FOUND", "message": f"資料夾不存在: {folder}"},
+        )
+
+    # 開啟檔案總管（跨平台）
+    try:
+        if sys.platform == "win32":
+            if os.path.exists(abs_path):
+                # 選取檔案
+                subprocess.Popen(f'explorer /select,"{abs_path}"', shell=True)
+            else:
+                subprocess.Popen(["explorer", str(folder)])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(folder)])
+        else:
+            subprocess.Popen(["xdg-open", str(folder)])
+    except Exception as e:
+        logger.error(f"Failed to open folder: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"code": "OPEN_FAILED", "message": f"無法開啟資料夾: {e}"},
+        )
+
+    return {"success": True, "folder": folder, "file": abs_path}

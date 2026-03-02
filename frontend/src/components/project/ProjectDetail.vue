@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { Project, ImageAsset, AudioAsset } from '@/types'
+import type { Project } from '@/types'
 import { ImageCard, AudioCard } from '@/components/preview'
 import ImageUploader from '@/components/upload/ImageUploader.vue'
 import AudioUploader from '@/components/upload/AudioUploader.vue'
@@ -29,11 +29,6 @@ const totalAudioDuration = computed(() => {
   return total.toFixed(1)
 })
 
-function formatDuration(seconds: number) {
-  const mins = Math.floor(seconds / 60)
-  const secs = Math.floor(seconds % 60)
-  return `${mins}:${secs.toString().padStart(2, '0')}`
-}
 </script>
 
 <template>
@@ -102,7 +97,7 @@ function formatDuration(seconds: number) {
           :duration="image.duration"
           :order="image.order"
           @remove="emit('removeImage', image.id)"
-          @reorder="emit('reorderImage', image.id, $event)"
+          @reorder="emit('reorderImage', image.id, $event as 'up' | 'down')"
         />
       </div>
     </div>

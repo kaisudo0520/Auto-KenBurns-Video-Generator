@@ -3,6 +3,21 @@
 // ========================================
 
 /**
+ * Timestamp type (ISO 8601 string)
+ */
+export type Timestamp = string;
+
+/**
+ * Pagination info
+ */
+export interface Pagination {
+  page: number;
+  page_size: number;
+  total_items: number;
+  total_pages: number;
+}
+
+/**
  * Project status enumeration
  */
 export type ProjectStatus = 'draft' | 'processing' | 'completed' | 'failed';
@@ -57,6 +72,7 @@ export type Encoder = 'h264_nvenc' | 'h265_nvenc' | 'libx264' | 'libx265';
  * Ken-Burns effect type
  */
 export type KenBurnsEffect =
+  | 'auto'
   | 'pan_left'
   | 'pan_right'
   | 'pan_up'

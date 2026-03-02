@@ -35,7 +35,7 @@ export const useProjectStore = defineStore('project', () => {
     loading.value = true
     error.value = null
     try {
-      const response = await api.getProjects(params)
+      const response = await api.getProjects(params as any)
       // response is { success: true, data: [...], pagination: {...} }
       _projects.value = response.data ?? []
       pagination.value = response.pagination ?? { page: 1, page_size: 20, total_items: 0, total_pages: 0 }

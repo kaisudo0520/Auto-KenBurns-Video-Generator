@@ -95,6 +95,12 @@ htmlcov/
 # Git
 .git/
 
+# Test data
+testfile/
+
+# Output data
+output/
+
 # Temporary files
 *.tmp
 *.temp

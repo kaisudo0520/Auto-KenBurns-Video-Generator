@@ -147,7 +147,7 @@ class FileService:
             file_path=file_path,
             content_type=content_type,
             size=len(content),
-            duration=int(duration) if duration else None,
+            duration=duration,
             sample_rate=sample_rate,
             loudness=loudness,
             status=FileStatus.READY,

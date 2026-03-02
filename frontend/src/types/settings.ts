@@ -7,15 +7,12 @@ import {
   FrameRate,
   OutputFormat,
   Encoder,
-  KenBurnsEffect,
-  EasingFunction,
   ResolutionConfig,
   FrameRateConfig,
   OutputFormatConfig,
   EncoderConfig,
   KenBurnsEffectConfig,
   EasingFunctionConfig,
-  ValidationResult,
 } from './common';
 
 /**

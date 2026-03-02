@@ -34,26 +34,31 @@ class TestKenBurnsServiceIntegration:
         """測試音樂分析（使用 Mock）"""
         service = KenBurnsService()
 
-        # Mock librosa
-        with patch('librosa.load') as mock_load, \
-             patch('librosa.beat.beat_track') as mock_beat, \
-             patch('librosa.frames_to_time') as mock_time, \
-             patch('librosa.get_duration') as mock_duration:
+        # 建立 mock librosa 模組（可能未安裝）
+        mock_librosa = MagicMock()
+        mock_librosa.load.return_value = (Mock(), 44100)
+        mock_librosa.beat.beat_track.return_value = (120.0, [0, 10, 20, 30])
+        mock_librosa.frames_to_time.return_value = [0.0, 0.5, 1.0, 1.5]
+        mock_librosa.get_duration.return_value = 180.0
 
-            # 設定 mock 回傳值
-            mock_load.return_value = (Mock(), 44100)
-            mock_beat.return_value = (120.0, [0, 10, 20, 30])
-            mock_time.return_value = [0.0, 0.5, 1.0, 1.5]
-            mock_duration.return_value = 180.0
+        # 將 mock 注入 sys.modules，確保 patch 能正常運作
+        with patch.dict('sys.modules', {
+            'librosa': mock_librosa,
+            'librosa.beat': mock_librosa.beat,
+        }):
+            with patch('librosa.load', mock_librosa.load), \
+                 patch('librosa.beat.beat_track', mock_librosa.beat.beat_track), \
+                 patch('librosa.frames_to_time', mock_librosa.frames_to_time), \
+                 patch('librosa.get_duration', mock_librosa.get_duration):
 
-            # 執行分析
-            result = service.analyze_music('/fake/path.mp3')
+                # 執行分析
+                result = service.analyze_music('/fake/path.mp3')
 
-            # 驗證結果
-            assert result.bpm == 120.0
-            assert result.beat_duration == 0.5
-            assert result.duration == 180.0
-            assert len(result.onset_times) == 4
+                # 驗證結果
+                assert result.bpm == 120.0
+                assert result.beat_duration == 0.5
+                assert result.duration == 180.0
+                assert len(result.onset_times) == 4
 
     def test_generate_slideshow_with_multiple_audios(self):
         """測試多首音樂的幻燈片生成"""
@@ -89,9 +94,9 @@ class TestKenBurnsServiceIntegration:
         # 測試 BPM 為 0 的情況
         duration = service.calculate_effect_duration(0)
 
-        # 應該使用預設 BPM 120
+        # 應該使用預設 BPM 120，結果在合理範圍內
         assert duration > 0
-        assert 0.5 <= duration <= 4.0
+        assert service.MIN_EFFECT_DURATION <= duration <= service.MAX_EFFECT_DURATION
 
     def test_error_handling_negative_bpm(self):
         """測試錯誤處理 - BPM 為負數"""

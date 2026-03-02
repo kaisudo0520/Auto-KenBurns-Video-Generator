@@ -20,6 +20,8 @@ const percent = computed(() => {
   return Math.min(100, Math.max(0, (props.value / props.max) * 100))
 })
 
+defineExpose({ percent })
+
 const heightClass = computed(() => {
   switch (props.size) {
     case 'sm': return 'h-1'

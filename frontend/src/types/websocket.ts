@@ -205,7 +205,7 @@ export const DEFAULT_WS_CONFIG: Partial<WSConnectionOptions> = {
  * Create WebSocket URL for job progress
  */
 export function createProgressWSUrl(baseUrl: string, jobId: string, token?: string): string {
-  const url = new URL(`${baseUrl}/ws/progress/${jobId}`);
+  const url = new URL(`${baseUrl}/ws/render/${jobId}`);
   if (token) {
     url.searchParams.set('token', token);
   }

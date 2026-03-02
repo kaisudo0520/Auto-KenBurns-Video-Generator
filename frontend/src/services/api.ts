@@ -165,7 +165,7 @@ class ApiClient {
   }
 
   async cancelRender(jobId: string): Promise<ApiResponse<CancelRenderResponse>> {
-    const response = await this.client.delete<ApiResponse<CancelRenderResponse>>(`/render/cancel/${jobId}`)
+    const response = await this.client.post<ApiResponse<CancelRenderResponse>>(`/render/cancel/${jobId}`)
     return response.data
   }
 
@@ -177,7 +177,7 @@ class ApiClient {
   // Quick Render API - 直接上傳圖片和音樂進行渲染
   async quickRender(
     images: File[],
-    audio: File | null = null,
+    audios: File[] = [],
     imageDurations: number[] = []
   ): Promise<{ job_id: string; status: string; estimated_duration: number; webSocket_url: string }> {
     const formData = new FormData()
@@ -187,20 +187,29 @@ class ApiClient {
       formData.append('images', img)
     })
 
-    // 添加音樂
-    if (audio) {
-      formData.append('audio', audio)
-    }
+    // 添加音樂（支援多首）
+    audios.forEach((audio) => {
+      formData.append('audios', audio)
+    })
 
     // 添加圖片時長
     formData.append('image_durations', JSON.stringify(imageDurations))
 
-    const response = await this.client.post('/quick-render', formData)
+    const response = await this.client.post('/quick-render', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    })
     return response.data
   }
 
   async getQuickRenderStatus(jobId: string): Promise<any> {
     const response = await this.client.get(`/quick-render/status/${jobId}`)
+    return response.data
+  }
+
+  async openOutputFolder(jobId: string): Promise<{ success: boolean; folder: string; file: string }> {
+    const response = await this.client.post<{ success: boolean; folder: string; file: string }>(`/render/open-folder/${jobId}`)
     return response.data
   }
 

@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import type { RenderJobStatus, RenderProgress, StartRenderResponse, RenderHistoryItem, JobStatus } from '@/types'
+import type { RenderJobStatus, RenderProgress, StartRenderResponse, RenderHistoryItem } from '@/types'
+import type { JobStatus } from '@/types'
 import { RENDER_STAGE_LABELS, JOB_STATUS_LABELS } from '@/types'
 import api from '@/services/api'
 import wsService from '@/services/websocket'
@@ -28,7 +29,7 @@ export const useRenderStore = defineStore('render', () => {
       if (!pollingJobId.value) return
 
       try {
-        const status = await api.getRenderStatus(pollingJobId.value).then(r => r.data)
+        const status = await api.getRenderStatus(pollingJobId.value).then(r => r as any)
 
         // 更新狀態
         if (currentJob.value) {
@@ -102,15 +103,15 @@ export const useRenderStore = defineStore('render', () => {
   }
 
   // 快速渲染 - 直接上傳圖片和音樂
-  async function quickRender(images: File[], audio: File | null, imageDurations: number[] = []) {
+  async function quickRender(images: File[], audios: File[] = [], imageDurations: number[] = []) {
     loading.value = true
     error.value = null
     try {
-      const response = await api.quickRender(images, audio, imageDurations)
+      const response = await api.quickRender(images, audios, imageDurations)
       currentJob.value = {
         job_id: response.job_id,
         project_id: '',
-        status: response.status,
+        status: response.status as JobStatus,
         estimated_duration: response.estimated_duration,
         webSocket_url: response.webSocket_url,
       }
@@ -128,8 +129,8 @@ export const useRenderStore = defineStore('render', () => {
     error.value = null
     try {
       const response = await api.getRenderStatus(jobId)
-      jobStatus.value = response.data
-      return response.data
+      jobStatus.value = response as any
+      return response as any
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Failed to fetch job status'
       throw e

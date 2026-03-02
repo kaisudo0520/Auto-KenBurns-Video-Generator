@@ -94,9 +94,9 @@ class KenBurnsService:
     DEFAULT_MIN_ZOOM = 1.0
     DEFAULT_MAX_ZOOM = 1.8
 
-    # 根據BPM的動作切換間隔（秒）
-    MIN_EFFECT_DURATION = 1.5   # 最小動作持續時間
-    MAX_EFFECT_DURATION = 4.0   # 最大動作持續時間
+    # 動作切換間隔限制（秒）：基於小節計算，此為安全上下限
+    MIN_EFFECT_DURATION = 2.5   # 最小動作持續時間
+    MAX_EFFECT_DURATION = 10.0  # 最大動作持續時間
 
     def __init__(self):
         self.random = random.Random()
@@ -166,20 +166,18 @@ class KenBurnsService:
         if bpm <= 0:
             bpm = 120.0  # 預設 BPM
 
-        beat_duration = 60.0 / bpm
+        # 以小節 (bar) 為單位計算動作持續時間
+        # 一小節 = 4 拍（4/4 拍號），時長 = 240 / BPM 秒
+        bar_duration = 240.0 / bpm
 
-        # 根據BPM調整：
-        # 低BPM (<80): 2-4拍 = 1.5-3秒
-        # 中BPM (80-140): 2-3拍 = 1-2秒
-        # 高BPM (>140): 1-2拍 = 0.5-1秒
-        if bpm < 80:
-            beats_per_effect = random.uniform(2, 4)
-        elif bpm < 140:
-            beats_per_effect = random.uniform(2, 3)
-        else:
-            beats_per_effect = random.uniform(1, 2)
+        # 每個動作持續 2~4 小節，自然隨 BPM 縮放：
+        # BPM 60 → bar=4.0s → 8-16s (clamp to 10s max)
+        # BPM 80 → bar=3.0s → 6-12s (clamp to 10s max)
+        # BPM 120 → bar=2.0s → 4-8s
+        # BPM 160 → bar=1.5s → 3-6s
+        bars_per_effect = random.uniform(2, 4)
 
-        duration = beat_duration * beats_per_effect * base_multiplier
+        duration = bar_duration * bars_per_effect * base_multiplier
 
         # 限制範圍
         return max(self.MIN_EFFECT_DURATION, min(self.MAX_EFFECT_DURATION, duration))

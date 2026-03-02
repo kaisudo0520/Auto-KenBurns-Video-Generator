@@ -2,7 +2,7 @@
 // Upload Types
 // ========================================
 
-import { FileStatus, BoundingBox } from './common';
+import { FileStatus } from './common';
 
 /**
  * Image file information after upload

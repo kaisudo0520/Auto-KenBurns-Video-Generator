@@ -11,7 +11,6 @@ import {
   EasingFunction,
   SubjectRegion,
   Timestamp,
-  Pagination,
   SortOrder,
 } from './common';
 

@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import type { RenderSettings, Resolution, FrameRate, OutputFormat } from '@/types'
-import { DEFAULT_RENDER_SETTINGS } from '@/types'
 
 const props = defineProps<{
   settings: RenderSettings

@@ -4,7 +4,7 @@
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-green?logo=fastapi)
 ![Vue 3](https://img.shields.io/badge/Vue-3+-42b883?logo=vue.js)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5+-3178c6?logo=typescript)
-![Tests](https://img.shields.io/badge/Tests-52%20passed-green)
+![Tests](https://img.shields.io/badge/Tests-108%20passed-green)
 ![Coverage](https://img.shields.io/badge/Coverage-70%25-yellow)
 
 ## 專案概述
@@ -13,14 +13,16 @@
 
 ## 功能特色
 
-- 圖片拖曳上傳（支援 JPG, PNG, WebP, BMP）
-- 音樂拖曳上傳（支援 MP3, WAV, AAC, FLAC, OGG）
-- **BPM 驅動 Ken-Burns 特效**：根據音樂節奏自動調整動作切換頻率
-- 持續動態動作：放大/縮小/平移/對角線/旋轉自動切換
+- 圖片拖曳上傳（支援 JPG, PNG, WebP）
+- 音樂拖曳上傳（支援 MP3, WAV, OGG）
+- **BPM 驅動 Ken-Burns 特效**：使用 Librosa 分析音樂 BPM，以正弦函數驅動 zoompan 縮放/平移動態
 - 畫面淡入淡出效果
-- 動漫人物主體保護（防止裁切頭部）
-- 即時渲染進度（WebSocket）
-- CUDA/GPU 硬體加速輸出
+- **FFmpeg 實際渲染**：使用 zoompan 濾鏡產生真實 Ken-Burns 影片
+- 即時渲染進度（WebSocket + `-progress pipe:1` 解析）
+- NVENC GPU 硬體加速（自動偵測，fallback 至 libx264）
+- 多音訊自動串接（FFmpeg concat 濾鏡）
+- 渲染取消支援（即時終止 FFmpeg 進程）
+- 輸出後一鍵開啟資料夾
 - 深色主題現代化 UI
 
 ## 技術架構
@@ -60,7 +62,7 @@
 
 ```bash
 git clone <repository-url>
-cd click-merge-ken-burn
+cd Auto-KenBurns-Video-Generator
 ```
 
 #### 2. 啟動後端
@@ -128,22 +130,23 @@ uvicorn backend.main:app --host 0.0.0.0 --port 8000 --workers 4
 ## 使用方式
 
 1. 開啟瀏覽器訪問 http://localhost:5173
-2. 建立新專案
-3. 上傳圖片（動漫人物圖片）
-4. 上傳音樂（YouTube 影片的音訊）
-5. 設定輸出格式（解析度、幀率）
-6. 點擊「開始生成影片」
-7. 等待渲染完成並下載
+2. 上傳圖片（動漫人物圖片等）
+3. 上傳音樂（可多首，系統自動串接）
+4. 點擊「開始渲染」
+5. 即時觀看渲染進度（WebSocket 推送）
+6. 渲染完成後點擊「開啟輸出資料夾」檢視影片
 
 ### BPM 驅動效果說明
 
-系統會自動分析音樂的 BPM，並據此調整 Ken-Burns 動作：
+系統使用 Librosa 分析音樂 BPM，以正弦函數驅動 FFmpeg zoompan 濾鏡的縮放與平移：
 
-| BPM 範圍 | 動作風格 | 切換間隔 |
+| BPM 範圍 | 縮放幅度 | 效果風格 |
 |----------|----------|----------|
-| < 80     | 緩慢悠長 | 1.5-3 秒 |
-| 80-140   | 標準     | 1-2 秒   |
-| > 140    | 快速動態 | 0.5-1 秒 |
+| < 80     | 0.25     | 緩慢悠長 |
+| 80-140   | 0.35     | 標準動態 |
+| > 140    | 0.45     | 快速強烈 |
+
+縮放循環次數與平移頻率皆由 BPM 動態計算，平移使用正弦/餘弦相位差產生橢圓軌跡。
 
 ## API 端點
 
@@ -151,22 +154,23 @@ uvicorn backend.main:app --host 0.0.0.0 --port 8000 --workers 4
 
 | 模組 | 端點 | 說明 |
 |------|------|------|
-| 上傳 | `/api/v1/upload/image` | 圖片上傳 |
-| 上傳 | `/api/v1/upload/audio` | 音訊上傳 |
+| 快速渲染 | `POST /api/v1/quick-render` | 上傳圖片+音樂直接渲染 |
+| 渲染狀態 | `GET /api/v1/render/status/{job_id}` | 查詢渲染進度 |
+| 取消渲染 | `POST /api/v1/render/cancel/{job_id}` | 取消渲染任務 |
+| 開啟資料夾 | `POST /api/v1/render/open-folder/{job_id}` | 開啟輸出資料夾 |
+| 上傳 | `POST /api/v1/upload/image` | 圖片上傳 |
+| 上傳 | `POST /api/v1/upload/audio` | 音訊上傳 |
 | 專案 | `/api/v1/projects` | 專案 CRUD |
-| 渲染 | `/api/v1/render/start` | 開始渲染 |
 | 設定 | `/api/v1/settings/*` | 系統設定 |
-| WebSocket | `/ws/render/{job_id}` | 即時進度 |
+| WebSocket | `/ws/render/{job_id}` | 即時渲染進度 |
 
 ## 測試
 
 本專案使用 TDD（測試驅動開發）：
 
 ```bash
-# 後端測試
-cd backend
-source venv/Scripts/activate
-python -m pytest tests/ -v
+# 後端測試（從專案根目錄執行）
+python -m pytest backend/tests/ -v
 
 # 前端測試
 cd frontend
@@ -177,34 +181,74 @@ npm run test
 
 | 類別 | 數量 |
 |------|------|
-| 後端單元測試 | 26 |
-| 後端整合測試 | 8 |
-| 前端單元測試 | 18 |
-| **總計** | **52** |
+| 後端測試 | 90 |
+| 前端測試 | 18 |
+| **總計** | **108** |
 
 ## 專案結構
 
 ```
 .
 ├── backend/                 # FastAPI 後端
-│   ├── routers/           # API 路由
-│   ├── services/          # 業務邏輯
-│   ├── models/            # SQLAlchemy 模型
-│   ├── schemas/           # Pydantic 模式
-│   ├── database/          # 資料庫連線
-│   └── migrations/        # Alembic 遷移
-├── frontend/              # Vue 3 前端
+│   ├── routers/             # API 路由
+│   ├── services/            # 業務邏輯
+│   │   ├── kenburns_service.py  # Ken-Burns 效果引擎（BPM 分析）
+│   │   ├── ffmpeg_renderer.py   # FFmpeg 渲染器（命令構建、進度追蹤）
+│   │   ├── render_service.py    # 渲染任務管理與協調
+│   │   └── file_service.py      # 檔案管理
+│   ├── models/              # SQLAlchemy 模型
+│   ├── schemas/             # Pydantic 模式
+│   ├── database/            # 資料庫連線
+│   ├── migrations/          # Alembic 遷移
+│   └── tests/               # pytest 測試
+├── frontend/                # Vue 3 前端
 │   ├── src/
-│   │   ├── components/   # Vue 元件
-│   │   ├── views/        # 頁面視圖
-│   │   ├── stores/       # Pinia 狀態
-│   │   ├── services/     # API 服務
-│   │   └── types/        # TypeScript 類型
-│   └── ...
-├── SPEC.md               # 技術規格書
-├── API.md                # API 文件
-└── CLAUDE.md             # Claude Code 指引
+│   │   ├── components/      # Vue 元件
+│   │   │   ├── common/      # 共用元件
+│   │   │   ├── player/      # 影片播放器
+│   │   │   ├── progress/    # 進度元件
+│   │   │   └── upload/      # 上傳元件
+│   │   ├── composables/     # Vue Composables
+│   │   ├── router/          # Vue Router 配置
+│   │   ├── views/           # 頁面視圖
+│   │   ├── stores/          # Pinia 狀態管理
+│   │   ├── services/        # API 與 WebSocket 服務
+│   │   └── types/           # TypeScript 類型定義
+│   ├── tailwind.config.js
+│   └── vite.config.ts
+├── SPEC.md                  # 技術規格書
+├── API.md                   # API 文件
+└── CLAUDE.md                # Claude Code 指引
 ```
+
+## 前端設計系統
+
+### 色彩
+
+- 主背景: `#0a0a0f` (深黑色)
+- 次背景: `#12121a` (深灰)
+- 強調色: Cyan `#06b6d4`, Violet `#8b5cf6`, Fuchsia `#d946ef`
+
+### 字體
+
+- 顯示字體: Outfit
+- 等寬字體: Space Mono
+
+### 元件樣式
+
+- 玻璃效果卡片 (`glass-card`)
+- 漸層按鈕 (`btn-primary`)
+- 拖曳上傳區 (`drop-zone`)
+- 進度條漸層 (`progress-gradient`)
+
+### API 代理
+
+前端通過 Vite proxy 連接後端（設定在 `vite.config.ts`）：
+
+- `/api/*` → `http://localhost:8000`
+- `/ws/*` → `ws://localhost:8000`
+- `/uploads/*` → `http://localhost:8000`
+- `/output/*` → `http://localhost:8000`
 
 ## 多 Agent 協作框架
 
@@ -220,6 +264,7 @@ npm run test
 | Coder-Frontend | 前端開發 |
 | Coder-Test | 測試工程師 |
 | Coder-Review | Code Review |
+| Coder-Debug | 問題診斷與除錯 |
 
 使用方式：
 ```

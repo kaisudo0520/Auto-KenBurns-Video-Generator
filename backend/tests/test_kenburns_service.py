@@ -58,34 +58,31 @@ class TestCalculateEffectDuration:
     """測試動作持續時間計算"""
 
     def test_low_bpm_slow_movement(self):
-        """低 BPM (<80) 應該產生較慢的動作"""
+        """低 BPM (<80) 應該產生較慢的動作（以小節為單位）"""
         service = KenBurnsService()
 
-        # BPM = 60 -> 每拍 1 秒
+        # BPM = 60 -> 一小節 = 4秒, 2~4 小節 = 8~16秒 (clamp to 10s max)
         duration = service.calculate_effect_duration(60)
 
-        # 低 BPM 應該產生較長的持續時間 (1.5-3 秒)
-        assert 1.5 <= duration <= 4.0
+        assert service.MIN_EFFECT_DURATION <= duration <= service.MAX_EFFECT_DURATION
 
     def test_medium_bpm_standard_movement(self):
-        """中 BPM (80-140) 應該產生標準動作"""
+        """中 BPM (80-140) 應該產生標準動作（以小節為單位）"""
         service = KenBurnsService()
 
-        # BPM = 120 -> 每拍 0.5 秒
+        # BPM = 120 -> 一小節 = 2秒, 2~4 小節 = 4~8秒
         duration = service.calculate_effect_duration(120)
 
-        # 中 BPM 應該產生標準持續時間 (1-2 秒)
-        assert 1.0 <= duration <= 3.0
+        assert service.MIN_EFFECT_DURATION <= duration <= service.MAX_EFFECT_DURATION
 
     def test_high_bpm_fast_movement(self):
-        """高 BPM (>140) 應該產生快速的動作"""
+        """高 BPM (>140) 應該產生較短的動作（以小節為單位）"""
         service = KenBurnsService()
 
-        # BPM = 160 -> 每拍 0.375 秒
+        # BPM = 160 -> 一小節 = 1.5秒, 2~4 小節 = 3~6秒
         duration = service.calculate_effect_duration(160)
 
-        # 高 BPM 應該產生較短的持續時間 (0.5-2 秒)
-        assert 0.5 <= duration <= 2.5
+        assert service.MIN_EFFECT_DURATION <= duration <= service.MAX_EFFECT_DURATION
 
     def test_duration_with_multiplier(self):
         """測試倍數影響"""

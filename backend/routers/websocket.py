@@ -47,14 +47,15 @@ class ConnectionManager:
     async def send_message(self, job_id: str, message: dict):
         """Send a message to all connections for a specific job."""
         if job_id in self.active_connections:
-            # Create a copy of the set to avoid modification during iteration
+            # 複製一份避免迭代時修改原始集合
             connections = list(self.active_connections[job_id])
             for connection in connections:
                 try:
                     await connection.send_json(message)
                 except Exception as e:
                     logger.error(f"Failed to send message to connection: {e}")
-                    connections.remove(connection)
+                    # 從原始集合中移除失敗的連線
+                    self.active_connections[job_id].discard(connection)
 
     async def broadcast_progress(self, job_id: str, progress_data: dict):
         """Broadcast progress update to all connections for a job."""

@@ -8,8 +8,7 @@ import uuid
 from datetime import datetime
 from typing import Optional, List
 
-from sqlalchemy import Column, String, Text, DateTime, Integer, ForeignKey, Enum as SQLEnum
-from sqlalchemy.dialects.postgresql import UUID as PGUUID
+from sqlalchemy import Column, String, Text, DateTime, Integer, Float, Boolean, ForeignKey, Enum as SQLEnum
 from sqlalchemy.orm import relationship
 
 from backend.database.connection import Base
@@ -137,19 +136,19 @@ class Project(Base):
         default=KenBurnsEffect.COMPOSE_PAN_ZOOM,
         nullable=False
     )
-    kenburns_duration = Column(Integer, default=5.0)
+    kenburns_duration = Column(Float, default=5.0)
     kenburns_easing = Column(
         SQLEnum(EasingFunction),
         default=EasingFunction.EASE_IN_OUT,
         nullable=False
     )
-    kenburns_min_zoom = Column(Integer, default=1.0)
-    kenburns_max_zoom = Column(Integer, default=1.5)
+    kenburns_min_zoom = Column(Float, default=1.0)
+    kenburns_max_zoom = Column(Float, default=1.5)
 
     # Audio fade settings
-    audio_fade_in = Column(Integer, default=2.0)
-    audio_fade_out = Column(Integer, default=2.0)
-    audio_crossfade = Column(Integer, default=True)
+    audio_fade_in = Column(Float, default=2.0)
+    audio_fade_out = Column(Float, default=2.0)
+    audio_crossfade = Column(Boolean, default=True)
 
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

@@ -140,8 +140,8 @@ class TestRenderService:
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_start_render_job_not_found(self, render_service, mock_db, mock_project):
-        """測試開始不存在的任務"""
+    async def test_start_render_job_not_found_returns_early(self, render_service, mock_db, mock_project):
+        """測試開始不存在的任務（應提早返回）"""
         mock_db.query.return_value.filter.return_value.first.return_value = None
 
         await render_service.start_render("nonexistent", mock_project)
@@ -173,8 +173,8 @@ class TestRenderService:
         assert job.status == JobStatus.COMPLETED
 
     @pytest.mark.asyncio
-    async def test_start_render_job_not_found(self, render_service, mock_db, mock_project):
-        """測試開始不存在的任務"""
+    async def test_start_render_job_not_found_no_commit(self, render_service, mock_db, mock_project):
+        """測試開始不存在的任務（不應呼叫 commit）"""
         mock_db.query.return_value.filter.return_value.first.return_value = None
 
         await render_service.start_render("nonexistent", mock_project)

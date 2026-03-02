@@ -4,6 +4,7 @@
 提供無專案儲存的快速渲染功能：直接上傳圖片和音樂，開始渲染。
 """
 
+import asyncio
 import logging
 import os
 import uuid
@@ -15,6 +16,7 @@ from sqlalchemy.orm import Session
 from PIL import Image
 
 from backend import deps
+from backend.database.connection import SessionLocal
 from backend.models.project import Project as ProjectModel
 from backend.models.project import ProjectStatus
 from backend.models.render_job import RenderJob as RenderJobModel
@@ -39,7 +41,7 @@ class QuickRenderResponse(BaseModel):
 @router.post("/quick-render", status_code=status.HTTP_202_ACCEPTED)
 async def quick_render(
     images: List[UploadFile] = File(..., description="圖片檔案（至少1張）"),
-    audio: UploadFile | None = None,
+    audios: List[UploadFile] = File(default=[], description="音樂檔案（可多首）"),
     image_durations: str = Form("[]", description="每張圖片顯示時長的JSON陣列"),
     db: Session = Depends(deps.get_db),
 ):
@@ -110,13 +112,15 @@ async def quick_render(
         # 創建 File 記錄
         file_record = FileModel(
             id=str(uuid.uuid4()),
+            file_type="image",
             original_filename=img.filename or f"image_{i}",
-            filename=filename,
-            filepath=filepath,
+            stored_filename=filename,
+            file_path=filepath,
             content_type=content_type,
             size=len(content),
             width=width,
             height=height,
+            status="ready",
         )
         db.add(file_record)
         saved_images.append({
@@ -126,11 +130,11 @@ async def quick_render(
 
     db.commit()
 
-    # 處理音樂（可選）
-    audio_record = None
+    # 處理音樂（可選，支援多首）
+    audio_records = []
     audio_duration = 0.0
 
-    if audio:
+    for audio in audios:
         content_type = audio.content_type or ""
         if content_type not in allowed_audio_types:
             raise HTTPException(
@@ -152,23 +156,31 @@ async def quick_render(
         # 創建 File 記錄
         audio_record = FileModel(
             id=str(uuid.uuid4()),
+            file_type="audio",
             original_filename=audio.filename or "audio",
-            filename=audio_filename,
-            filepath=audio_filepath,
+            stored_filename=audio_filename,
+            file_path=audio_filepath,
             content_type=content_type,
             size=len(audio_content),
+            status="ready",
         )
         db.add(audio_record)
 
         # 獲取音樂時長
         try:
-            import librosa
-            audio_duration = float(librosa.get_duration(filename=audio_filepath))
-            audio_record.duration = audio_duration
+            from pydub import AudioSegment
+            audio_seg = AudioSegment.from_file(audio_filepath)
+            dur = len(audio_seg) / 1000.0  # 毫秒轉秒
+            audio_record.duration = dur
+            audio_duration += dur
         except Exception as e:
             logger.warning(f"無法獲取音樂時長: {e}")
-            audio_duration = 60.0  # 預設60秒
+            audio_record.duration = 60.0
+            audio_duration += 60.0  # 預設60秒
 
+        audio_records.append(audio_record)
+
+    if audio_records:
         db.commit()
 
     # 創建臨時專案
@@ -202,13 +214,13 @@ async def quick_render(
         )
         db.add(asset)
 
-    # 創建 AudioAsset 記錄（如果有必要）
-    if audio_record:
+    # 創建 AudioAsset 記錄（支援多首）
+    for i, audio_record in enumerate(audio_records):
         audio_asset = AudioAsset(
             id=str(uuid.uuid4()),
             project_id=project.id,
             file_id=audio_record.id,
-            order=0,
+            order=i,
         )
         db.add(audio_asset)
 
@@ -218,19 +230,36 @@ async def quick_render(
     render_service = RenderService(db)
     job = await render_service.create_render_job(project)
 
-    # 開始渲染
-    await render_service.start_render(job.id, project)
+    job_id = job.id
+    project_id = project.id
 
-    logger.info(f"快速渲染任務已啟動: job_id={job.id}, images={len(saved_images)}, audio_duration={audio_duration}s")
+    logger.info(f"快速渲染任務已建立: job_id={job_id}, images={len(saved_images)}, audio_duration={audio_duration}s")
+
+    # 在背景啟動渲染（使用獨立的 DB session）
+    async def _run_render_in_background():
+        bg_db = SessionLocal()
+        try:
+            bg_project = bg_db.query(ProjectModel).filter(ProjectModel.id == project_id).first()
+            if not bg_project:
+                logger.error(f"背景渲染找不到專案: {project_id}")
+                return
+            bg_service = RenderService(bg_db)
+            await bg_service.start_render(job_id, bg_project)
+        except Exception as e:
+            logger.error(f"背景渲染異常: {e}", exc_info=True)
+        finally:
+            bg_db.close()
+
+    asyncio.create_task(_run_render_in_background())
 
     # 計算預估時間
     estimated_duration = int(total_duration * 1.5)
 
     return QuickRenderResponse(
-        job_id=job.id,
-        status=job.status.value,
+        job_id=job_id,
+        status="queued",
         estimated_duration=estimated_duration,
-        webSocket_url=f"/ws/render/{job.id}",
+        webSocket_url=f"/ws/render/{job_id}",
     )
 
 
