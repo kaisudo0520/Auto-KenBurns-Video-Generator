@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useRenderStore } from '@/stores/renderStore'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
@@ -9,11 +9,31 @@ import AudioUploader from '@/components/upload/AudioUploader.vue'
 const router = useRouter()
 const renderStore = useRenderStore()
 
-const images = ref<File[]>([])
-const audios = ref<File[]>([])
-const imagePreviews = ref<string[]>([])
+// === 資料模型（帶唯一 ID，支援拖曳 key 追蹤）===
+interface ImageItem {
+  id: string
+  file: File
+  preview: string
+}
+
+interface AudioItem {
+  id: string
+  file: File
+}
+
+let nextId = 0
+function genId(): string {
+  return `item_${++nextId}`
+}
+
+const imageItems = ref<ImageItem[]>([])
+const audioItems = ref<AudioItem[]>([])
 const isRendering = ref(false)
 const renderError = ref<string | null>(null)
+
+// 提取 File 陣列供渲染使用
+const imageFiles = computed(() => imageItems.value.map(i => i.file))
+const audioFiles = computed(() => audioItems.value.map(i => i.file))
 
 // 格式化檔案大小
 function formatFileSize(bytes: number): string {
@@ -22,51 +42,99 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
+// === 檔案操作 ===
 function handleImagesSelected(files: File[]) {
-  images.value = [...images.value, ...files]
-
-  // 生成預覽
   files.forEach(file => {
+    const id = genId()
+    // 先加入佔位（確保順序），再非同步載入預覽
+    imageItems.value.push({ id, file, preview: '' })
+
     const reader = new FileReader()
     reader.onload = (e) => {
-      imagePreviews.value.push(e.target?.result as string)
+      const item = imageItems.value.find(i => i.id === id)
+      if (item) {
+        item.preview = e.target?.result as string
+      }
     }
     reader.readAsDataURL(file)
   })
 }
 
 function handleImageRemove(index: number) {
-  images.value.splice(index, 1)
-  imagePreviews.value.splice(index, 1)
+  imageItems.value.splice(index, 1)
 }
 
 function handleAudiosSelected(files: File[]) {
-  audios.value = [...audios.value, ...files]
+  files.forEach(file => {
+    audioItems.value.push({ id: genId(), file })
+  })
 }
 
 function handleAudioRemove(index: number) {
-  audios.value.splice(index, 1)
+  audioItems.value.splice(index, 1)
 }
 
+// === 拖曳重排序 ===
+const dragState = ref<{
+  type: 'image' | 'audio'
+  fromIndex: number
+} | null>(null)
+const dropTargetIndex = ref(-1)
+
+function onDragStart(type: 'image' | 'audio', index: number, event: DragEvent) {
+  dragState.value = { type, fromIndex: index }
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', '') // Firefox 需要
+  }
+}
+
+function onDragOver(type: 'image' | 'audio', index: number, event: DragEvent) {
+  if (!dragState.value || dragState.value.type !== type) return
+  event.preventDefault()
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = 'move'
+  }
+  dropTargetIndex.value = index
+}
+
+function onDrop(type: 'image' | 'audio', toIndex: number, event: DragEvent) {
+  event.preventDefault()
+  if (!dragState.value || dragState.value.type !== type) return
+
+  const fromIndex = dragState.value.fromIndex
+  if (fromIndex !== toIndex) {
+    const arr = type === 'image' ? imageItems.value : audioItems.value
+    const [item] = arr.splice(fromIndex, 1)
+    arr.splice(toIndex, 0, item)
+  }
+
+  dragState.value = null
+  dropTargetIndex.value = -1
+}
+
+function onDragEnd() {
+  dragState.value = null
+  dropTargetIndex.value = -1
+}
+
+// 是否正在拖曳重排序（用於禁用上傳區域的拖曳反應）
+const isDragging = computed(() => dragState.value !== null)
+
+// === 渲染 ===
 async function startRender() {
-  if (images.value.length === 0) {
+  if (imageItems.value.length === 0) {
     renderError.value = '請上傳至少一張圖片'
     return
   }
 
   isRendering.value = true
   renderError.value = null
-
-  // 清除前次渲染狀態
   renderStore.clearRender()
 
   try {
-    const result = await renderStore.quickRender(images.value, audios.value)
-
-    // 連接 WebSocket
+    const result = await renderStore.quickRender(imageFiles.value, audioFiles.value)
     renderStore.connectProgressWS(result.job_id)
-
-    // 跳轉到結果頁面
     router.push(`/result/${result.job_id}`)
   } catch (error: any) {
     console.error('Render error:', error)
@@ -77,9 +145,8 @@ async function startRender() {
 }
 
 function clearAll() {
-  images.value = []
-  imagePreviews.value = []
-  audios.value = []
+  imageItems.value = []
+  audioItems.value = []
   renderError.value = null
 }
 </script>
@@ -105,34 +172,59 @@ function clearAll() {
         <div class="flex items-center gap-3 mb-4">
           <div class="w-1 h-6 rounded-full bg-gradient-to-b from-accent-cyan to-accent-violet"></div>
           <h2 class="text-xl font-bold font-display text-white">圖片</h2>
-          <span class="text-zinc-500 text-sm">({{ images.length }} 張)</span>
+          <span class="text-zinc-500 text-sm">({{ imageItems.length }} 張)</span>
         </div>
 
-        <!-- 已選擇的圖片 -->
-        <div v-if="imagePreviews.length > 0" class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-3 mb-4">
-          <div
-            v-for="(preview, index) in imagePreviews"
-            :key="index"
-            class="relative aspect-square rounded-lg overflow-hidden group"
-          >
-            <img
-              :src="preview"
-              :alt="`圖片 ${index + 1}`"
-              class="w-full h-full object-cover"
-            />
-            <button
-              @click="handleImageRemove(index)"
-              class="absolute top-1 right-1 w-6 h-6 rounded-full bg-black/60 text-white opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
+        <!-- 已選擇的圖片（可拖曳重排序）-->
+        <div v-if="imageItems.length > 0" class="mb-4">
+          <div class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-3">
+            <div
+              v-for="(item, index) in imageItems"
+              :key="item.id"
+              draggable="true"
+              @dragstart="onDragStart('image', index, $event)"
+              @dragover="onDragOver('image', index, $event)"
+              @drop="onDrop('image', index, $event)"
+              @dragend="onDragEnd"
+              class="relative aspect-square rounded-lg overflow-hidden group cursor-grab active:cursor-grabbing select-none transition-all duration-150"
+              :class="{
+                'opacity-40 scale-95': dragState?.type === 'image' && dragState.fromIndex === index,
+                'ring-2 ring-accent-cyan': dragState?.type === 'image' && dropTargetIndex === index && dragState.fromIndex !== index,
+              }"
             >
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
+              <!-- 序號標記 -->
+              <div class="absolute top-1 left-1 z-10 w-5 h-5 rounded-full bg-black/70 text-white text-[10px] flex items-center justify-center font-mono leading-none">
+                {{ index + 1 }}
+              </div>
+
+              <!-- 圖片預覽 -->
+              <img
+                v-if="item.preview"
+                :src="item.preview"
+                :alt="`圖片 ${index + 1}`"
+                class="w-full h-full object-cover"
+              />
+              <div v-else class="w-full h-full bg-zinc-800 animate-pulse"></div>
+
+              <!-- 移除按鈕 -->
+              <button
+                @click="handleImageRemove(index)"
+                class="absolute top-1 right-1 w-6 h-6 rounded-full bg-black/60 text-white opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
+              >
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
           </div>
+          <p v-if="imageItems.length > 1" class="text-zinc-600 text-xs mt-2">拖曳圖片可調整順序</p>
         </div>
 
-        <!-- 上傳按鈕 -->
-        <ImageUploader @upload="handleImagesSelected" />
+        <!-- 上傳按鈕（拖曳重排序時禁用以避免誤觸發）-->
+        <ImageUploader
+          @upload="handleImagesSelected"
+          :class="{ 'pointer-events-none': isDragging }"
+        />
       </div>
 
       <!-- 分割線 -->
@@ -143,25 +235,47 @@ function clearAll() {
         <div class="flex items-center gap-3 mb-4">
           <div class="w-1 h-6 rounded-full bg-gradient-to-b from-accent-fuchsia to-accent-cyan"></div>
           <h2 class="text-xl font-bold font-display text-white">音樂（可選）</h2>
-          <span v-if="audios.length > 0" class="text-zinc-500 text-sm">({{ audios.length }} 首)</span>
+          <span v-if="audioItems.length > 0" class="text-zinc-500 text-sm">({{ audioItems.length }} 首)</span>
         </div>
 
-        <!-- 已選擇的音樂列表 -->
-        <div v-if="audios.length > 0" class="space-y-2 mb-4">
+        <!-- 已選擇的音樂列表（可拖曳重排序）-->
+        <div v-if="audioItems.length > 0" class="space-y-2 mb-4">
           <div
-            v-for="(audioFile, index) in audios"
-            :key="index"
-            class="flex items-center justify-between p-4 rounded-lg bg-bg-secondary border border-zinc-700/50"
+            v-for="(item, index) in audioItems"
+            :key="item.id"
+            draggable="true"
+            @dragstart="onDragStart('audio', index, $event)"
+            @dragover="onDragOver('audio', index, $event)"
+            @drop="onDrop('audio', index, $event)"
+            @dragend="onDragEnd"
+            class="flex items-center justify-between p-4 rounded-lg bg-bg-secondary border border-zinc-700/50 cursor-grab active:cursor-grabbing select-none transition-all duration-150"
+            :class="{
+              'opacity-40': dragState?.type === 'audio' && dragState.fromIndex === index,
+              'border-accent-fuchsia ring-1 ring-accent-fuchsia': dragState?.type === 'audio' && dropTargetIndex === index && dragState.fromIndex !== index,
+            }"
           >
             <div class="flex items-center gap-3 min-w-0">
+              <!-- 拖曳手柄 -->
+              <div class="shrink-0 text-zinc-600">
+                <svg class="w-4 h-4" viewBox="0 0 16 16" fill="currentColor">
+                  <circle cx="5" cy="3" r="1.5"/><circle cx="11" cy="3" r="1.5"/>
+                  <circle cx="5" cy="8" r="1.5"/><circle cx="11" cy="8" r="1.5"/>
+                  <circle cx="5" cy="13" r="1.5"/><circle cx="11" cy="13" r="1.5"/>
+                </svg>
+              </div>
+              <!-- 序號 -->
+              <span class="shrink-0 w-5 h-5 rounded-full bg-accent-fuchsia/20 text-accent-fuchsia text-[10px] flex items-center justify-center font-mono leading-none">
+                {{ index + 1 }}
+              </span>
+              <!-- 音樂圖示 -->
               <div class="w-10 h-10 shrink-0 rounded-lg bg-accent-fuchsia/20 flex items-center justify-center">
                 <svg class="w-5 h-5 text-accent-fuchsia" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
                 </svg>
               </div>
               <div class="min-w-0">
-                <p class="text-white truncate">{{ audioFile.name }}</p>
-                <p class="text-zinc-500 text-xs">{{ formatFileSize(audioFile.size) }}</p>
+                <p class="text-white truncate">{{ item.file.name }}</p>
+                <p class="text-zinc-500 text-xs">{{ formatFileSize(item.file.size) }}</p>
               </div>
             </div>
             <button @click="handleAudioRemove(index)" class="shrink-0 ml-3 text-zinc-400 hover:text-white transition-colors">
@@ -170,10 +284,14 @@ function clearAll() {
               </svg>
             </button>
           </div>
+          <p v-if="audioItems.length > 1" class="text-zinc-600 text-xs">拖曳音樂可調整播放順序</p>
         </div>
 
-        <!-- 上傳按鈕（始終顯示，可累積添加） -->
-        <AudioUploader @upload="handleAudiosSelected" />
+        <!-- 上傳按鈕（拖曳重排序時禁用）-->
+        <AudioUploader
+          @upload="handleAudiosSelected"
+          :class="{ 'pointer-events-none': isDragging }"
+        />
       </div>
 
       <!-- 錯誤訊息 -->
@@ -186,14 +304,14 @@ function clearAll() {
         <button
           @click="clearAll"
           class="btn-secondary flex-1"
-          :disabled="isRendering || (images.length === 0 && audios.length === 0)"
+          :disabled="isRendering || (imageItems.length === 0 && audioItems.length === 0)"
         >
           清除全部
         </button>
         <button
           @click="startRender"
           class="btn-primary flex-1 flex items-center justify-center gap-2"
-          :disabled="isRendering || images.length === 0"
+          :disabled="isRendering || imageItems.length === 0"
         >
           <LoadingSpinner v-if="isRendering" size="sm" />
           <svg v-else class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -206,10 +324,10 @@ function clearAll() {
 
       <!-- 提示文字 -->
       <p class="text-zinc-500 text-sm text-center mt-4">
-        <template v-if="audios.length > 0">
+        <template v-if="audioItems.length > 0">
           圖片將根據音樂時長自動分配顯示時間
         </template>
-        <template v-else-if="images.length > 0">
+        <template v-else-if="imageItems.length > 0">
           每張圖片預設顯示 5 秒
         </template>
         <template v-else>

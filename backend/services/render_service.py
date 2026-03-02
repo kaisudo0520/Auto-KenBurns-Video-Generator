@@ -310,12 +310,8 @@ class RenderService:
         output_path = os.path.join(self.output_dir, f"{project.id}.mp4")
         os.makedirs(self.output_dir, exist_ok=True)
 
-        # 計算有效總時長（多段模式因交叉淡入淡出而縮短）
-        crossfade_dur = 1.0
-        if len(audio_durations) > 1:
-            effective_total = sum(audio_durations) - crossfade_dur * (len(audio_durations) - 1)
-        else:
-            effective_total = total_duration
+        # 計算有效總時長（各段直接串接，無交叉縮減）
+        effective_total = sum(audio_durations) if len(audio_durations) > 1 else total_duration
 
         # 計算每張圖片的臉部安全參數
         face_params_list = None
@@ -348,7 +344,7 @@ class RenderService:
             total_duration=total_duration,
             encoder=encoder,
             audio_durations=audio_durations if len(audio_durations) > 1 else None,
-            crossfade_duration=crossfade_dur,
+            crossfade_duration=1.0,
             bpms=bpms if len(bpms) > 1 else None,
             face_params_list=face_params_list,
         )
