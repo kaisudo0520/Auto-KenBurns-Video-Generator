@@ -118,9 +118,9 @@ class KenBurnsService:
             # 載入音訊
             y, sr = librosa.load(audio_path, sr=None)
 
-            # 估算BPM
+            # 估算BPM（librosa >= 0.10 回傳 numpy 陣列）
             tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
-            bpm = float(tempo)
+            bpm = float(np.atleast_1d(tempo)[0])
 
             # 取得節拍時間點
             beat_times = librosa.frames_to_time(beat_frames, sr=sr)
@@ -401,6 +401,7 @@ class KenBurnsService:
         min_x, min_y = 1.0, 1.0
         max_x, max_y = 0.0, 0.0
         head_region = None
+        face_region = None
 
         for region in subject_regions:
             region_type = region.get("type", "body")
@@ -411,7 +412,16 @@ class KenBurnsService:
             w = bounds.get("width", 0)
             h = bounds.get("height", 0)
 
-            if region_type == "head":
+            if region_type == "face":
+                # 臉部區域：向上擴展含髮型（臉高 × 0.5）
+                hair_expand = h * 0.5
+                face_region = (
+                    max(0, x - self.HEAD_SAFE_MARGIN),
+                    max(0, y - hair_expand - self.HEAD_SAFE_MARGIN),
+                    min(1.0, w + 2 * self.HEAD_SAFE_MARGIN),
+                    min(1.0, h + hair_expand + 2 * self.HEAD_SAFE_MARGIN),
+                )
+            elif region_type == "head":
                 # 頭部區域特別保護
                 head_region = (
                     x - self.HEAD_SAFE_MARGIN,
@@ -425,7 +435,10 @@ class KenBurnsService:
                 max_x = max(max_x, x + w)
                 max_y = max(max_y, y + h)
 
-        # 如果有頭部區域，以它為主
+        # 優先順序：face > head > body
+        if face_region:
+            return face_region
+
         if head_region:
             return head_region
 
@@ -435,8 +448,8 @@ class KenBurnsService:
             width = max_x - min_x + 2 * padding
             height = max_y - min_y + 2 * padding
             return (
-                max(0, min_x - padding),
-                max(0, min_y - padding),
+                max(0.0, min_x - padding),
+                max(0.0, min_y - padding),
                 min(1.0, width),
                 min(1.0, height)
             )
@@ -444,6 +457,95 @@ class KenBurnsService:
         # 默認返回
         margin = self.SAFE_ZONE_MARGIN
         return (margin, margin, 1 - 2*margin, 1 - 2*margin)
+
+    @staticmethod
+    def compute_face_safe_params(
+        subject_regions: List[Dict],
+        default_pan_amp_x: float,
+        default_pan_amp_y: float,
+        zoom_amp: float,
+        margin: float = 0.03,
+    ) -> Optional[Dict]:
+        """
+        根據臉部偵測結果計算安全的平移參數
+
+        數學原理：
+        1. 中心偏移：將平移基準從影像中心偏移到臉部中心
+        2. 安全振幅鉗制：確保最大縮放+最大平移時，臉部仍完全在 viewport 內
+
+        Args:
+            subject_regions: 偵測結果列表（由 face_detection_service 產出）
+            default_pan_amp_x: 預設水平平移振幅
+            default_pan_amp_y: 預設垂直平移振幅
+            zoom_amp: 縮放振幅（build_zoompan_expr 計算出的值）
+            margin: 額外安全邊距（佔畫面比例）
+
+        Returns:
+            None（無臉部）或 dict:
+            {
+                "cx_offset": float,      # 水平中心偏移（-0.5 ~ 0.5）
+                "cy_offset": float,      # 垂直中心偏移（-0.5 ~ 0.5）
+                "safe_pan_amp_x": float,  # 安全水平振幅
+                "safe_pan_amp_y": float,  # 安全垂直振幅
+                "has_face": True,
+            }
+        """
+        if not subject_regions:
+            return None
+
+        # 取信心最高的臉部
+        faces = [r for r in subject_regions if r.get("type") == "face"]
+        if not faces:
+            return None
+
+        best = faces[0]  # 已按 confidence 排序
+        bounds = best["bounds"]
+        fx = bounds["x"]
+        fy = bounds["y"]
+        fw = bounds["width"]
+        fh = bounds["height"]
+
+        # 臉部中心（0~1 正規化座標）
+        face_cx = fx + fw / 2
+        face_cy = fy + fh / 2
+
+        # 中心偏移量（相對於影像中心 0.5）
+        cx_offset = face_cx - 0.5
+        cy_offset = face_cy - 0.5
+
+        # 臉部半寬/半高（含髮型向上擴展 50%）
+        hair_expand = fh * 0.5
+        face_half_x = fw / 2
+        face_half_y = (fh + hair_expand) / 2
+
+        # 安全振幅鉗制：
+        # viewport 半寬 = 0.5 / z_max（z_max 時 viewport 最小）
+        # 最大平移時，臉部邊緣必須在 viewport 內
+        # max_safe_pan = viewport_half - face_half - margin - |offset|
+        z_max = 1.0 + zoom_amp
+        vp_half_x = 0.5 / z_max
+        vp_half_y = 0.5 / z_max
+
+        max_safe_x = vp_half_x - face_half_x - margin - abs(cx_offset)
+        max_safe_y = vp_half_y - face_half_y - margin - abs(cy_offset)
+
+        # 鉗制到最小值 0.005（完全不動太死板）
+        safe_pan_amp_x = min(default_pan_amp_x, max(0.005, max_safe_x))
+        safe_pan_amp_y = min(default_pan_amp_y, max(0.005, max_safe_y))
+
+        logger.info(
+            f"臉部安全參數: offset=({cx_offset:.3f}, {cy_offset:.3f}), "
+            f"pan_amp=({safe_pan_amp_x:.4f}, {safe_pan_amp_y:.4f}) "
+            f"← 原始({default_pan_amp_x:.4f}, {default_pan_amp_y:.4f})"
+        )
+
+        return {
+            "cx_offset": cx_offset,
+            "cy_offset": cy_offset,
+            "safe_pan_amp_x": safe_pan_amp_x,
+            "safe_pan_amp_y": safe_pan_amp_y,
+            "has_face": True,
+        }
 
     def generate_slideshow(
         self,

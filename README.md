@@ -15,7 +15,8 @@
 
 - 圖片拖曳上傳（支援 JPG, PNG, WebP）
 - 音樂拖曳上傳（支援 MP3, WAV, OGG）
-- **BPM 驅動 Ken-Burns 特效**：使用 Librosa 分析音樂 BPM，以正弦函數驅動 zoompan 縮放/平移動態
+- **BPM 驅動 Ken-Burns 特效**：使用 Librosa 分析音樂 BPM，以多頻黃金比例正弦疊加驅動 zoompan 縮放/平移動態
+- **動漫臉部保護**：自動偵測動漫角色臉部（含側臉），動態調整平移振幅與中心偏移，避免 Ken-Burns 效果裁切臉部
 - 畫面淡入淡出效果
 - **FFmpeg 實際渲染**：使用 zoompan 濾鏡產生真實 Ken-Burns 影片
 - 即時渲染進度（WebSocket + `-progress pipe:1` 解析）
@@ -46,6 +47,7 @@
 - **後端**：FastAPI、SQLAlchemy 2.0、Pydantic v2、FFmpeg
 - **前端**：Vue 3 (Composition API)、Vite、TypeScript、Tailwind CSS、Pinia
 - **影像處理**：OpenCV、Pillow、FFmpeg (NVENC GPU 加速)
+- **動漫臉部偵測**：dghs-imgutils (ONNX YOLO)、lbpcascade_animeface (fallback)
 - **音訊分析**：Librosa (BPM 偵測)
 
 ## 快速開始
@@ -148,6 +150,15 @@ uvicorn backend.main:app --host 0.0.0.0 --port 8000 --workers 4
 
 縮放循環次數與平移頻率皆由 BPM 動態計算，平移使用正弦/餘弦相位差產生橢圓軌跡。
 
+### 動漫臉部保護
+
+渲染前自動偵測圖片中的動漫角色臉部（支援正面與側臉），並動態調整 Ken-Burns 效果參數：
+
+- **偵測引擎**：優先使用 dghs-imgutils（ONNX YOLO 模型），fallback 至 lbpcascade_animeface
+- **中心偏移**：將平移基準從影像中心偏移到臉部中心
+- **安全振幅鉗制**：確保最大縮放+最大平移時，臉部仍完全在 viewport 內
+- **降級策略**：偵測失敗時自動使用預設行為，不影響渲染流程
+
 ## API 端點
 
 所有 API 路由使用 `/api/v1/` 前綴：
@@ -192,10 +203,12 @@ npm run test
 ├── backend/                 # FastAPI 後端
 │   ├── routers/             # API 路由
 │   ├── services/            # 業務邏輯
-│   │   ├── kenburns_service.py  # Ken-Burns 效果引擎（BPM 分析）
-│   │   ├── ffmpeg_renderer.py   # FFmpeg 渲染器（命令構建、進度追蹤）
-│   │   ├── render_service.py    # 渲染任務管理與協調
-│   │   └── file_service.py      # 檔案管理
+│   │   ├── kenburns_service.py       # Ken-Burns 效果引擎（BPM 分析、安全區計算）
+│   │   ├── ffmpeg_renderer.py        # FFmpeg 渲染器（命令構建、進度追蹤）
+│   │   ├── render_service.py         # 渲染任務管理與協調
+│   │   ├── face_detection_service.py # 動漫臉部偵測（imgutils / cascade）
+│   │   └── file_service.py           # 檔案管理
+│   ├── resources/           # 靜態資源（分類器 XML 等）
 │   ├── models/              # SQLAlchemy 模型
 │   ├── schemas/             # Pydantic 模式
 │   ├── database/            # 資料庫連線

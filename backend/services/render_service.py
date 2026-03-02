@@ -185,6 +185,34 @@ class RenderService:
         if _is_cancelled():
             return
 
+        # === 階段 1.5: 偵測動漫臉部 ===
+        job.current_stage = RenderStage.DETECTING_SUBJECTS
+        job.progress = 7
+        self.db.commit()
+        await broadcast_job_progress(
+            job_id=job.id, progress=7,
+            stage="detecting_subjects", stage_label="偵測動漫臉部", stage_percentage=0,
+        )
+
+        from backend.services.face_detection_service import detect_anime_faces
+
+        face_regions_list: list[list[dict]] = []
+        for idx, img_path in enumerate(image_paths):
+            regions = detect_anime_faces(img_path)
+            face_regions_list.append(regions)
+            pct = int((idx + 1) / len(image_paths) * 100)
+            await broadcast_job_progress(
+                job_id=job.id, progress=7,
+                stage="detecting_subjects", stage_label="偵測動漫臉部",
+                stage_percentage=pct,
+            )
+
+        face_count = sum(1 for r in face_regions_list if r)
+        logger.info(f"臉部偵測完成: {face_count}/{len(image_paths)} 張圖片偵測到臉部")
+
+        if _is_cancelled():
+            return
+
         # === 階段 2: 處理音訊 ===
         job.current_stage = RenderStage.PROCESSING_AUDIO
         job.progress = 10
@@ -199,21 +227,26 @@ class RenderService:
             if audio_asset.file and audio_asset.file.file_path:
                 audio_paths.append(audio_asset.file.file_path)
 
-        # BPM 分析
+        # BPM 分析（收集每首音訊的個別 BPM 和時長）
         bpm = 120.0
+        bpms: list[float] = []
         total_audio_duration = 0.0
+        audio_durations: list[float] = []
 
         if audio_paths:
             kenburns = KenBurnsService()
             try:
-                bpm_analysis = kenburns.analyze_music(audio_paths[0])
-                bpm = bpm_analysis.bpm
-                total_audio_duration = bpm_analysis.duration
-                # 如果有多首音訊，加總時長
-                for ap in audio_paths[1:]:
-                    extra = kenburns.analyze_music(ap)
-                    total_audio_duration += extra.duration
-                logger.info(f"BPM 分析結果: {bpm:.1f}, 總音訊時長: {total_audio_duration:.1f}s")
+                for ap in audio_paths:
+                    analysis = kenburns.analyze_music(ap)
+                    bpms.append(analysis.bpm)
+                    audio_durations.append(analysis.duration)
+                bpm = bpms[0]  # 單段模式使用第一首的 BPM
+                total_audio_duration = sum(audio_durations)
+                logger.info(
+                    f"BPM 分析結果: {[f'{b:.1f}' for b in bpms]}, "
+                    f"音訊時長: {[f'{d:.1f}s' for d in audio_durations]}, "
+                    f"總計: {total_audio_duration:.1f}s"
+                )
             except Exception as e:
                 logger.warning(f"BPM 分析失敗，使用預設值: {e}")
                 bpm = 120.0
@@ -245,7 +278,7 @@ class RenderService:
 
         total_frames = int(total_duration * fps_value)
         job.total_frames = total_frames
-        job.output_duration = total_duration
+        job.output_duration = total_duration  # 暫存，稍後會以 effective_total 更新
         self.db.commit()
 
         # 建立 FFmpeg 渲染器
@@ -277,6 +310,35 @@ class RenderService:
         output_path = os.path.join(self.output_dir, f"{project.id}.mp4")
         os.makedirs(self.output_dir, exist_ok=True)
 
+        # 計算有效總時長（多段模式因交叉淡入淡出而縮短）
+        crossfade_dur = 1.0
+        if len(audio_durations) > 1:
+            effective_total = sum(audio_durations) - crossfade_dur * (len(audio_durations) - 1)
+        else:
+            effective_total = total_duration
+
+        # 計算每張圖片的臉部安全參數
+        face_params_list = None
+        if any(face_regions_list):
+            from backend.services.kenburns_service import KenBurnsService
+
+            # 用第一首 BPM 計算 zoom_amp（與 build_zoompan_expr 一致）
+            ref_bpm = bpm
+            ref_ratio = max(0.5, min(ref_bpm / 160.0, 1.5))
+            ref_zoom_amp = 0.08 + 0.17 * ref_ratio
+            ref_pan_x = 0.02 + 0.035 * ref_ratio
+            ref_pan_y = 0.014 + 0.024 * ref_ratio
+
+            face_params_list = []
+            for regions in face_regions_list:
+                fp = KenBurnsService.compute_face_safe_params(
+                    subject_regions=regions,
+                    default_pan_amp_x=ref_pan_x,
+                    default_pan_amp_y=ref_pan_y,
+                    zoom_amp=ref_zoom_amp,
+                )
+                face_params_list.append(fp)
+
         # 構建 FFmpeg 命令
         cmd = renderer.build_command(
             image_paths=image_paths,
@@ -285,6 +347,10 @@ class RenderService:
             bpm=bpm,
             total_duration=total_duration,
             encoder=encoder,
+            audio_durations=audio_durations if len(audio_durations) > 1 else None,
+            crossfade_duration=crossfade_dur,
+            bpms=bpms if len(bpms) > 1 else None,
+            face_params_list=face_params_list,
         )
 
         # 進度回調
@@ -293,7 +359,7 @@ class RenderService:
             mapped = 30 + int(progress_pct * 0.65)
             job.progress = mapped
             job.current_frame = int(current_time * fps_value)
-            eta = int((total_duration - current_time) * 1.2) if current_time > 0 else 0
+            eta = int((effective_total - current_time) * 1.2) if current_time > 0 else 0
             job.eta_seconds = max(0, eta)
             self.db.commit()
             await broadcast_job_progress(
@@ -311,7 +377,7 @@ class RenderService:
         # 執行 FFmpeg
         success = await renderer.execute(
             cmd=cmd,
-            total_duration=total_duration,
+            total_duration=effective_total,
             progress_callback=on_progress,
             cancel_check=_is_cancelled,
         )
@@ -329,9 +395,9 @@ class RenderService:
             stage_percentage=50,
         )
 
-        # 更新輸出資訊
+        # 更新輸出資訊（使用考慮交叉淡入淡出的有效時長）
         job.output_path = output_path
-        job.output_duration = total_duration
+        job.output_duration = effective_total
         if os.path.exists(output_path):
             job.output_size = os.path.getsize(output_path)
         self.db.commit()

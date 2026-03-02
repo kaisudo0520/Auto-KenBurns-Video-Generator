@@ -128,35 +128,44 @@ npm run test
 
 渲染階段：`LOADING_IMAGES → PROCESSING_AUDIO → GENERATING_PATHS → ENCODING_VIDEO → FINALIZING`
 
-FFmpeg 使用 `zoompan` 濾鏡搭配 BPM 驅動的序列式表達式產生 Ken-Burns 效果：
+FFmpeg 使用 `zoompan` 濾鏡搭配 BPM 驅動的有機感表達式產生 Ken-Burns 效果：
 
-**4 步子循環**：`放大 → 平移出 → 平移回中心 → 縮小`（不斷重複）
-- 每個動作 = 2 小節（bar_duration = 240/BPM 秒）
-- 方向由黃金角序列決定（137.5°，半隨機、均勻覆蓋 360°）
-- Smootherstep 緩動：`6t⁵ - 15t⁴ + 10t³`（速度和加速度邊界為零）
+**運動設計**（參考專業紀錄片手法）：
+- **平移為主導（~70%）**：3 層黃金比例頻率正弦疊加，軌跡永不重複
+- **縮放為點綴（~30%）**：慢速餘弦 + smootherstep 包絡，自然的放大→縮小波形
+- **微動呼吸感**：低振幅高頻正弦（畫面 0.2%），模擬攝影機手持質感
 
-**抖動消除三層防護**：
-1. 動作順序設計：平移時 zoom 恆定，縮放時在中心（無座標漂移）
-2. `trunc()` 包裹 x/y 座標（一致的整數截斷方向）
-3. 4x 超取樣 + Lanczos 縮放（捨入誤差降至 0.25px，參考 FFmpeg Trac #4298）
+**縮放（z 軸）**：
+- 週期 = 8 小節（BPM 160: 12s, BPM 80: 24s）
+- `(1-cos(ω·on+φ))/2` → smootherstep → ~35% 時間近乎無縮放
 
-**BPM 驅動的縮放幅度**（柔和範圍）：
-- `z` (zoom): `1.0 + amplitude`，amplitude 由 BPM 決定
-- `x`, `y` (pan): `trunc(center + visible_size * amp * cos/sin(golden_angle))`
-- 多音訊使用 `concat` 濾鏡串接
+**平移（x/y 軸）**：
+- 基頻 = 2 小節（與節拍同步），權重 60%
+- 二次頻 = 基頻 × φ（黃金比例），權重 30%
+- 三次頻 = 基頻 × φ²，權重 10%
+- X 用 sin、Y 用 cos → 橢圓軌跡（非直線往復）
+
+**BPM 動態調整**（以 BPM 160 為基準）：
+- 所有參數（週期、幅度）隨 BPM 連續縮放
+- 多段模式每段使用各自的 BPM（個別分析）
+- `clamped_ratio = clamp(bpm/160, 0.5, 1.5)`
+- 縮放幅度：`0.08 + 0.17 × ratio`（BPM 80→0.165, 160→0.250）
+- 平移幅度：`0.02 + 0.035 × ratio`（BPM 80→0.038, 160→0.055）
+
+**抖動消除**：
+1. `trunc()` 包裹 x/y 座標（一致的整數截斷方向）
+2. 4x 超取樣 + Lanczos 縮放（捨入誤差降至 0.25px，參考 FFmpeg Trac #4298）
+
+**多段渲染**（多圖 + 多音訊）：
+- 每首音訊配一張圖片（圖片循環分配），每段獨立 zoompan + 獨立 BPM
+- 影片段間 `xfade`（fade 過渡），音訊段間 `acrossfade`（三角形曲線）
+- `cycle_offset × 黃金角(2.4 rad)` 確保跨段相位連續不重複
+- 整體首尾 fade in/out（影片 1 秒、音訊 1.5 秒）
+- 有效時長 = Σ(音訊時長) - crossfade × (段數-1)
 
 編碼器自動偵測：優先使用 `h264_nvenc` (NVENC GPU)，fallback 至 `libx264`。
 進度追蹤：FFmpeg `-progress pipe:1` 解析 `out_time_us`。
 取消支援：`_active_renderers` 全域字典追蹤 FFmpeg 進程，取消時呼叫 `terminate()`。
-
-### Ken-Burns Effect (BPM-Driven)
-
-BPM 驅動的縮放幅度（柔和範圍，避免晃動感）：
-- Low BPM (<80): amplitude=0.15, 最大放大至 1.15x
-- Medium BPM (80-140): amplitude=0.20, 最大放大至 1.20x
-- High BPM (>140): amplitude=0.28, 最大放大至 1.28x
-
-平移幅度：水平 5%（pan_amp_x=0.05）、垂直 3.5%（pan_amp_y=0.035，16:9 考量）
 
 ### Anime Character Protection
 

@@ -10,7 +10,7 @@ import logging
 import math
 import os
 import shutil
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -48,23 +48,45 @@ class FFmpegRenderer:
         logger.info("使用 libx264 軟體編碼器")
         return "libx264"
 
-    def build_zoompan_expr(self, bpm: float, total_frames: int) -> Tuple[str, str, str]:
+    def build_zoompan_expr(
+        self, bpm: float, total_frames: int, cycle_offset: int = 0,
+        face_params: Optional[Dict] = None,
+    ) -> Tuple[str, str, str]:
         """
-        根據 BPM 構建序列式 zoompan 表達式（半隨機方向）
+        根據 BPM 構建有機感 zoompan 表達式
 
-        4 步子循環不斷重複：放大 → 平移出去 → 縮小 → 平移回中心
-        每個子循環的平移方向由黃金角序列決定（半隨機、均勻分佈、不重複）。
-        放大後必定先縮小才能再放大。每段正弦緩動 (ease-in-out)。
-        段尾位置 = 段首位置，邏輯串連。
+        設計理念（參考專業紀錄片 Ken-Burns 手法）：
+        - 平移為主導（~70%），縮放為點綴（~30%）
+        - 多頻正弦疊加取代固定循環（永不重複的有機運動）
+        - 微動呼吸感（低振幅高頻擾動模擬攝影機手持質感）
 
-        黃金角 ≈ 137.5°，數學上保證：
-        - 連續方向間隔最大化（永遠不會連續朝相似方向）
-        - 均勻覆蓋 360° 所有方向（包含對角）
-        - 確定性（相同 BPM + 時長 = 相同結果）
+        === 縮放 ===
+        使用慢速餘弦 + smootherstep 包絡：
+        - 週期 = 8 小節（BPM 160: 12s, BPM 80: 24s）
+        - 自然的放大→持續→縮小→靜止 波形
+        - smootherstep 壓扁過渡區，~35% 時間近乎無縮放（純平移）
+
+        === 平移 ===
+        3 層黃金比例頻率正弦疊加：
+        - 基頻 = 2 小節（與節拍同步），權重 60%
+        - 二次頻 = 基頻 × φ（黃金比例），權重 30%
+        - 三次頻 = 基頻 × φ²，權重 10%
+        - X 軸用 sin、Y 軸用 cos → 橢圓軌跡（非直線）
+        - 不可公約頻率比確保軌跡永不完全重複
+
+        === 微動 ===
+        固定低頻正弦（~0.2% 畫面振幅），模擬攝影機呼吸
+
+        === 臉部保護 ===
+        當 face_params 不為 None 時：
+        - 平移基準從影像中心偏移到臉部中心（cx_offset, cy_offset）
+        - 平移振幅縮限到安全範圍（safe_pan_amp_x/y）
 
         Args:
             bpm: 音樂 BPM
             total_frames: 總幀數
+            cycle_offset: 相位偏移量（多段渲染時確保方向連續性）
+            face_params: 臉部安全參數（由 compute_face_safe_params 產出），None 表示無臉部偵測
 
         Returns:
             (z_expr, x_expr, y_expr) 三個 FFmpeg 表達式字串
@@ -72,79 +94,113 @@ class FFmpegRenderer:
         if bpm <= 0:
             bpm = 120.0
 
-        # 一小節 = 4 拍（4/4 拍號），時長 = 240 / BPM 秒
+        # BPM 速度比率（以 160 為基準）
+        bpm_ratio = bpm / 160.0
+        clamped_ratio = max(0.5, min(bpm_ratio, 1.5))
+
+        # 一小節 = 4 拍，時長 = 240 / BPM 秒
         bar_duration = 240.0 / bpm
 
-        # 每個動作 = 2 小節（BPM 120 → 4秒, BPM 80 → 6秒, BPM 160 → 3秒）
-        bars_per_action = 2
-        action_frames = bars_per_action * bar_duration * self.fps
-        # 子循環 = 4 個動作（放大→平移→縮小→回中心）
-        sub_cycle_frames = 4 * action_frames
+        # === 縮放參數 ===
+        # 週期 = 8 小節（比平移基頻慢 4 倍，讓縮放不頻繁）
+        # BPM 160: 8 × 1.5s = 12s, BPM 93: 8 × 2.58s = 20.6s
+        zoom_period_frames = 8 * bar_duration * self.fps
+        zoom_amp = 0.08 + 0.17 * clamped_ratio
 
-        # 縮放幅度根據 BPM 調整（柔和範圍，避免晃動感）
-        if bpm < 80:
-            zoom_amp = 0.15   # 慢歌：最大放大至 1.15x
-        elif bpm < 140:
-            zoom_amp = 0.20   # 中速：最大放大至 1.20x
-        else:
-            zoom_amp = 0.28   # 快歌：最大放大至 1.28x
+        # === 平移參數 ===
+        # 基頻週期 = 2 小節（與節拍同步）
+        pan_period_frames = 2 * bar_duration * self.fps
+        phi = 1.618033988749895  # 黃金比例
 
-        pan_amp_x = 0.05    # 水平幅度（畫面 5%，約 96px at 1920）
-        pan_amp_y = 0.035   # 垂直幅度（畫面 3.5%，16:9 考量）
+        # 幅度隨 BPM 縮放
+        pan_amp_x = 0.02 + 0.035 * clamped_ratio   # 水平
+        pan_amp_y = 0.014 + 0.024 * clamped_ratio   # 垂直（16:9）
 
-        # --- FFmpeg 子表達式 ---
-        af = f"{action_frames:.1f}"
-        scf = f"{sub_cycle_frames:.1f}"
+        # === 臉部保護：覆寫平移振幅 ===
+        cx_offset = 0.0
+        cy_offset = 0.0
+        if face_params:
+            cx_offset = face_params["cx_offset"]
+            cy_offset = face_params["cy_offset"]
+            pan_amp_x = face_params["safe_pan_amp_x"]
+            pan_amp_y = face_params["safe_pan_amp_y"]
+            logger.debug(
+                f"臉部保護啟用: offset=({cx_offset:.3f}, {cy_offset:.3f}), "
+                f"safe_amp=({pan_amp_x:.4f}, {pan_amp_y:.4f})"
+            )
 
-        # qseg: 子循環內位置 (0=放大, 1=平移出, 2=平移回中心, 3=縮小)
-        qseg = f"floor(mod(floor(on/{af}),4))"
-        # sc: 子循環編號（決定本次平移方向）
-        sc = f"floor(on/{scf})"
-        # t: 段內進度 (0→1)，smootherstep 緩動
-        # 6t⁵ - 15t⁴ + 10t³：邊界處速度和加速度皆為零，消除頓挫感
-        tr = f"(mod(on,{af})/{af})"
-        t = f"(6*pow({tr},5)-15*pow({tr},4)+10*pow({tr},3))"
-        # alpha: 黃金角序列（每個子循環旋轉 137.5°）
-        # 2.39996... rad ≈ 137.508° = 360° × (1 - 1/φ)
-        alpha = f"({sc}*2.4)"
+        # === 微動參數 ===
+        micro_amp = 0.002  # 畫面 0.2%（1920px → ±4px）
 
-        # z: 縮放
-        # 新順序：放大→平移出→平移回→縮小
-        # 確保平移時 zoom 恆定（不會因 zoom 變化造成座標漂移）
-        # 確保縮放時在中心（不會因 zoom=1.0 時偏移超出畫面）
-        # qseg=0: 放大 1.0→1.0+amp
-        # qseg=1: 保持放大（平移出去中）
-        # qseg=2: 保持放大（平移回中心中）
-        # qseg=3: 縮小 1.0+amp→1.0
-        z_expr = (
-            f"1.0+{zoom_amp}*("
-            f"between({qseg},0,0)*{t}"
-            f"+between({qseg},1,1)"
-            f"+between({qseg},2,2)"
-            f"+between({qseg},3,3)*(1-{t})"
-            f")"
+        # === 相位偏移（多段連續性）===
+        # cycle_offset × 黃金角(2.4 rad) 確保每段方向不重複
+        phase_base = cycle_offset * 2.4
+
+        logger.debug(
+            f"zoompan 參數: BPM={bpm:.0f}, ratio={bpm_ratio:.2f}, "
+            f"zoom_period={zoom_period_frames/self.fps:.1f}s, "
+            f"pan_period={pan_period_frames/self.fps:.1f}s, "
+            f"zoom_amp={zoom_amp:.3f}, pan_x={pan_amp_x:.3f}, pan_y={pan_amp_y:.3f}"
         )
 
-        # x: 水平平移（方向由 cos(alpha) 決定）
-        # qseg=0: 靜止在中心（放大中）
-        # qseg=1: 中心 → cos(alpha)*A（平移出去）
-        # qseg=2: cos(alpha)*A → 中心（平移回來）
-        # qseg=3: 靜止在中心（縮小中）
-        # trunc() 確保一致的整數截斷，消除捨入方向不一致的抖動
+        # === FFmpeg 表達式構建 ===
+
+        # --- 縮放頻率 ---
+        zf = 2 * math.pi / zoom_period_frames
+
+        # --- 平移頻率（3 層黃金比例）---
+        f1 = 2 * math.pi / pan_period_frames       # 基頻
+        f2 = f1 * phi                               # ×φ
+        f3 = f1 * phi * phi                         # ×φ²
+
+        # --- 相位 ---
+        p1 = phase_base
+        p2 = phase_base + 2.4     # 黃金角偏移
+        p3 = phase_base + 4.8     # 2 × 黃金角偏移
+
+        # --- 微動頻率（固定、互質）---
+        mf_x = 0.013   # 週期 ≈ 16s at 30fps
+        mf_y = 0.019   # 週期 ≈ 11s at 30fps
+        mp_x = phase_base * 0.7   # 微動相位
+        mp_y = phase_base * 1.3
+
+        # --- z: 縮放表達式 ---
+        # (1 - cos(ω·on + φ)) / 2 → 0→1→0 的平滑鐘形包絡
+        # smootherstep 壓扁過渡區：~35% 時間在 <10% zoom（純平移）
+        tz = f"((1-cos({zf:.8f}*on+{p1:.4f}))/2)"
+        zs = f"(6*pow({tz},5)-15*pow({tz},4)+10*pow({tz},3))"
+        z_expr = f"1.0+{zoom_amp:.4f}*{zs}"
+
+        # --- x: 水平平移表達式 ---
+        # 3 層 sin 疊加（60% + 30% + 10%）+ 微動
+        # trunc() 消除 FFmpeg 整數捨入抖動
+        # 臉部偏移：加入 iw*cx_offset 常數項，將基準從畫面中心移到臉部中心
+        x_pan = (
+            f"0.6*sin({f1:.8f}*on+{p1:.4f})"
+            f"+0.3*sin({f2:.8f}*on+{p2:.4f})"
+            f"+0.1*sin({f3:.8f}*on+{p3:.4f})"
+        )
+        x_offset_term = f"+iw*{cx_offset:.6f}" if abs(cx_offset) > 0.001 else ""
         x_expr = (
-            f"trunc((iw-iw/zoom)/2+iw/zoom*{pan_amp_x}*cos({alpha})*("
-            f"between({qseg},1,1)*{t}"
-            f"+between({qseg},2,2)*(1-{t})"
-            f"))"
+            f"trunc((iw-iw/zoom)/2"
+            f"{x_offset_term}"
+            f"+iw/zoom*({pan_amp_x:.4f}*({x_pan})"
+            f"+{micro_amp}*sin({mf_x}*on+{mp_x:.4f})))"
         )
 
-        # y: 垂直平移（方向由 sin(alpha) 決定）
-        # 模式與 x 相同，sin(alpha) 控制垂直分量
+        # --- y: 垂直平移表達式 ---
+        # 用 cos 而非 sin → X/Y 構成橢圓軌跡（非直線往復）
+        y_pan = (
+            f"0.6*cos({f1:.8f}*on+{p1:.4f})"
+            f"+0.3*cos({f2:.8f}*on+{p2:.4f})"
+            f"+0.1*cos({f3:.8f}*on+{p3:.4f})"
+        )
+        y_offset_term = f"+ih*{cy_offset:.6f}" if abs(cy_offset) > 0.001 else ""
         y_expr = (
-            f"trunc((ih-ih/zoom)/2+ih/zoom*{pan_amp_y}*sin({alpha})*("
-            f"between({qseg},1,1)*{t}"
-            f"+between({qseg},2,2)*(1-{t})"
-            f"))"
+            f"trunc((ih-ih/zoom)/2"
+            f"{y_offset_term}"
+            f"+ih/zoom*({pan_amp_y:.4f}*({y_pan})"
+            f"+{micro_amp}*sin({mf_y}*on+{mp_y:.4f})))"
         )
 
         return z_expr, x_expr, y_expr
@@ -157,32 +213,52 @@ class FFmpegRenderer:
         bpm: float,
         total_duration: float,
         encoder: str = "libx264",
+        audio_durations: Optional[List[float]] = None,
+        crossfade_duration: float = 1.0,
+        bpms: Optional[List[float]] = None,
+        face_params_list: Optional[List[Optional[Dict]]] = None,
     ) -> List[str]:
         """
         構建完整的 FFmpeg 命令
+
+        單段模式：1 張圖片 + 0~1 首音訊
+        多段模式：N 首音訊各配 1 張圖片，段間 xfade/acrossfade 交叉淡入淡出
 
         Args:
             image_paths: 圖片路徑列表
             audio_paths: 音訊路徑列表
             output_path: 輸出檔案路徑
-            bpm: 音樂 BPM
+            bpm: 音樂 BPM（單段模式使用）
             total_duration: 總時長（秒）
             encoder: 編碼器名稱
+            audio_durations: 每首音訊的個別時長（多段模式必填）
+            crossfade_duration: 段間交叉淡入淡出時長（秒）
+            bpms: 每首音訊的個別 BPM（多段模式，動態調整效果速度）
+            face_params_list: 每張圖片的臉部安全參數（與 image_paths 對應）
 
         Returns:
             FFmpeg 命令參數列表
         """
-        total_frames = int(total_duration * self.fps)
-        z_expr, x_expr, y_expr = self.build_zoompan_expr(bpm, total_frames)
+        # 多段模式：多首音訊 + 個別時長
+        if len(audio_paths) > 1 and audio_durations and len(audio_durations) == len(audio_paths):
+            return self._build_multi_segment_command(
+                image_paths, audio_paths, output_path, bpm,
+                audio_durations, encoder, crossfade_duration, bpms,
+                face_params_list,
+            )
 
-        # 淡入淡出幀數（1 秒）
+        # === 單段模式（原始邏輯） ===
+        total_frames = int(total_duration * self.fps)
+        # 取第一張圖片的 face_params（單段模式只有 1 張圖片）
+        fp = face_params_list[0] if face_params_list else None
+        z_expr, x_expr, y_expr = self.build_zoompan_expr(bpm, total_frames, face_params=fp)
+
+        # 影片淡入淡出幀數（1 秒）
         fade_frames = self.fps
         fade_out_start = max(0, total_frames - fade_frames)
 
-        # 構建 filter_complex
         # 超取樣倍率：先放大至 4x 解析度再做 zoompan，
         # 將整數捨入誤差從 1px 降至 0.25px（亞像素級，視覺不可見）
-        # 參考：FFmpeg Trac #4298 — zoompan 整數捨入是已知的抖動根因
         oversample = 4
         os_w = self.output_width * oversample
         os_h = self.output_height * oversample
@@ -196,13 +272,23 @@ class FFmpegRenderer:
             f"fade=in:0:{fade_frames},fade=out:{fade_out_start}:{fade_frames}[v]"
         )
 
-        # 音訊濾鏡
+        # 音訊濾鏡（加入淡入淡出）
+        audio_fade_dur = 1.5
         if len(audio_paths) > 1:
             audio_inputs = "".join(f"[{i+1}:a]" for i in range(len(audio_paths)))
-            audio_filter = f"{audio_inputs}concat=n={len(audio_paths)}:v=0:a=1[a]"
+            fade_out_t = max(0, total_duration - audio_fade_dur)
+            audio_filter = (
+                f"{audio_inputs}concat=n={len(audio_paths)}:v=0:a=1,"
+                f"afade=t=in:st=0:d={audio_fade_dur},"
+                f"afade=t=out:st={fade_out_t:.2f}:d={audio_fade_dur}[a]"
+            )
             filter_complex = f"{video_filter};{audio_filter}"
         elif len(audio_paths) == 1:
-            audio_filter = f"[1:a]anull[a]"
+            fade_out_t = max(0, total_duration - audio_fade_dur)
+            audio_filter = (
+                f"[1:a]afade=t=in:st=0:d={audio_fade_dur},"
+                f"afade=t=out:st={fade_out_t:.2f}:d={audio_fade_dur}[a]"
+            )
             filter_complex = f"{video_filter};{audio_filter}"
         else:
             filter_complex = video_filter
@@ -243,6 +329,181 @@ class FFmpegRenderer:
 
         # 輸出路徑
         cmd.append(output_path)
+
+        return cmd
+
+    def _build_multi_segment_command(
+        self,
+        image_paths: List[str],
+        audio_paths: List[str],
+        output_path: str,
+        bpm: float,
+        audio_durations: List[float],
+        encoder: str = "libx264",
+        crossfade_duration: float = 1.0,
+        bpms: Optional[List[float]] = None,
+        face_params_list: Optional[List[Optional[Dict]]] = None,
+    ) -> List[str]:
+        """
+        構建多段 FFmpeg 命令：每首音訊配一張圖片，段間交叉淡入淡出
+
+        圖片循環分配：若圖片數 < 音訊數，圖片會循環使用。
+        影片段間使用 xfade（fade 過渡）串接。
+        音訊段間使用 acrossfade（三角形曲線）串接。
+        整體首尾加上淡入/淡出效果。
+        每段使用各自的 BPM 動態調整效果速度。
+        """
+        n_segments = len(audio_paths)
+
+        # 超取樣設定
+        oversample = 4
+        os_w = self.output_width * oversample
+        os_h = self.output_height * oversample
+
+        # 防止 crossfade 超過最短段的一半
+        min_seg_dur = min(audio_durations)
+        cf = min(crossfade_duration, min_seg_dur / 2)
+
+        # 音訊淡入淡出時長
+        audio_fade_dur = 1.5
+
+        # 每段 BPM（若未提供，全部使用同一個 bpm）
+        seg_bpms = bpms if bpms and len(bpms) == n_segments else [bpm] * n_segments
+
+        # 分配圖片（循環）
+        segment_images = [image_paths[i % len(image_paths)] for i in range(n_segments)]
+
+        filter_parts: List[str] = []
+
+        # --- 每段影片：獨立 zoompan（各自 BPM） ---
+        cumulative_cycles = 0
+
+        for i in range(n_segments):
+            seg_bpm = seg_bpms[i]
+            seg_frames = int(audio_durations[i] * self.fps)
+            # 取對應圖片的 face_params（循環分配，與 segment_images 一致）
+            seg_fp = None
+            fp_list = face_params_list or []
+            if fp_list:
+                img_idx = i % len(image_paths)
+                if img_idx < len(fp_list):
+                    seg_fp = fp_list[img_idx]
+            z_expr, x_expr, y_expr = self.build_zoompan_expr(
+                seg_bpm, seg_frames, cycle_offset=cumulative_cycles,
+                face_params=seg_fp,
+            )
+            filter_parts.append(
+                f"[{i}:v]format=yuv420p,"
+                f"scale={os_w}:{os_h}:flags=lanczos,"
+                f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}'"
+                f":d={seg_frames}:s={self.output_width}x{self.output_height}:fps={self.fps}[v{i}]"
+            )
+            # 累計循環數量，確保下段相位不重複
+            seg_bar_dur = 240.0 / max(seg_bpm, 1.0)
+            seg_zoom_period = 8 * seg_bar_dur * self.fps
+            cumulative_cycles += max(1, int(seg_frames / seg_zoom_period)) + 1
+
+        # --- 影片交叉淡入淡出 (xfade) ---
+        if n_segments == 1:
+            prev_label = "v0"
+            cumulative_dur = audio_durations[0]
+        else:
+            prev_label = "v0"
+            cumulative_dur = audio_durations[0]
+            for i in range(1, n_segments):
+                offset = cumulative_dur - cf
+                out_label = f"vx{i}"
+                filter_parts.append(
+                    f"[{prev_label}][v{i}]xfade=transition=fade"
+                    f":duration={cf:.2f}:offset={offset:.2f}[{out_label}]"
+                )
+                prev_label = out_label
+                cumulative_dur += audio_durations[i] - cf
+
+        # 整體影片淡入淡出
+        fade_frames = self.fps
+        total_out_frames = int(cumulative_dur * self.fps)
+        fade_out_start = max(0, total_out_frames - fade_frames)
+        filter_parts.append(
+            f"[{prev_label}]fade=in:0:{fade_frames},"
+            f"fade=out:{fade_out_start}:{fade_frames}[v]"
+        )
+
+        # --- 音訊處理 ---
+        audio_input_offset = n_segments  # 音訊輸入索引從圖片數量之後開始
+
+        if n_segments == 1:
+            aidx = audio_input_offset
+            fade_out_t = max(0, audio_durations[0] - audio_fade_dur)
+            filter_parts.append(
+                f"[{aidx}:a]afade=t=in:st=0:d={audio_fade_dur},"
+                f"afade=t=out:st={fade_out_t:.2f}:d={audio_fade_dur}[a]"
+            )
+        else:
+            # 準備每段音訊（直接傳遞）
+            for i in range(n_segments):
+                aidx = audio_input_offset + i
+                filter_parts.append(f"[{aidx}:a]anull[a{i}]")
+
+            # 鏈式 acrossfade
+            prev_a = "a0"
+            for i in range(1, n_segments):
+                out_label = f"ax{i}"
+                filter_parts.append(
+                    f"[{prev_a}][a{i}]acrossfade=d={cf:.2f}:c1=tri:c2=tri[{out_label}]"
+                )
+                prev_a = out_label
+
+            # 整體音訊淡入淡出
+            effective_total = sum(audio_durations) - cf * (n_segments - 1)
+            fade_out_t = max(0, effective_total - audio_fade_dur)
+            filter_parts.append(
+                f"[{prev_a}]afade=t=in:st=0:d={audio_fade_dur},"
+                f"afade=t=out:st={fade_out_t:.2f}:d={audio_fade_dur}[a]"
+            )
+
+        filter_complex = ";".join(filter_parts)
+
+        # --- 構建命令 ---
+        cmd = [shutil.which("ffmpeg") or "ffmpeg", "-y"]
+
+        # 輸入：每段圖片（循環）
+        for img_path in segment_images:
+            cmd.extend(["-loop", "1", "-i", img_path])
+
+        # 輸入：音訊
+        for audio_path in audio_paths:
+            cmd.extend(["-i", audio_path])
+
+        # 濾鏡
+        cmd.extend(["-filter_complex", filter_complex])
+
+        # 輸出映射
+        cmd.extend(["-map", "[v]", "-map", "[a]"])
+
+        # 編碼設定
+        cmd.extend(["-c:v", encoder])
+        if encoder == "h264_nvenc":
+            cmd.extend(["-preset", "medium", "-rc", "vbr", "-cq", "18"])
+        else:
+            cmd.extend(["-preset", "medium", "-crf", "18"])
+
+        cmd.extend(["-c:a", "aac", "-b:a", "192k"])
+
+        # 時長限制（考慮交叉淡入淡出的縮減）
+        effective_total = sum(audio_durations) - cf * (n_segments - 1)
+        cmd.extend(["-t", f"{effective_total:.2f}"])
+
+        # 進度回報
+        cmd.extend(["-progress", "pipe:1"])
+
+        # 輸出路徑
+        cmd.append(output_path)
+
+        logger.info(
+            f"多段渲染: {n_segments} 段, "
+            f"crossfade={cf:.1f}s, 有效時長={effective_total:.1f}s"
+        )
 
         return cmd
 

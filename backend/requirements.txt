@@ -32,6 +32,10 @@ httpx>=0.25.0  # For async HTTP testing
 # Audio Analysis
 librosa>=0.10.0
 
+# Anime Face Detection (ONNX YOLO model, supports side faces)
+dghs-imgutils>=0.19.0
+onnxruntime>=1.19.0
+
 # Environment
 python-dotenv>=1.0.0
 
