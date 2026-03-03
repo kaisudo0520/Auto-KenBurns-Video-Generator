@@ -343,9 +343,9 @@ class RenderService:
             bpm=bpm,
             total_duration=total_duration,
             encoder=encoder,
-            audio_durations=audio_durations if len(audio_durations) > 1 else None,
+            audio_durations=audio_durations or None,
             crossfade_duration=1.0,
-            bpms=bpms if len(bpms) > 1 else None,
+            bpms=bpms or None,
             face_params_list=face_params_list,
         )
 

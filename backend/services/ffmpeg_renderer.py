@@ -249,11 +249,23 @@ class FFmpegRenderer:
         Returns:
             FFmpeg 命令參數列表
         """
-        # 多段模式：多首音訊 + 個別時長
-        if len(audio_paths) > 1 and audio_durations and len(audio_durations) == len(audio_paths):
+        # 多段模式：多張圖片 OR 多首音訊
+        is_multi_audio = len(audio_paths) > 1 and audio_durations and len(audio_durations) == len(audio_paths)
+        is_multi_image = len(image_paths) > 1
+        if is_multi_audio or is_multi_image:
+            # 計算每段時長
+            if is_multi_audio:
+                # 多首音訊：每首音訊一段，段數 = 音訊數
+                seg_durations = audio_durations
+            elif audio_durations:
+                # 單首音訊 + 多張圖片：均分音訊時長，段數 = 圖片數
+                seg_durations = [audio_durations[0] / len(image_paths)] * len(image_paths)
+            else:
+                # 無音訊 + 多張圖片：均分總時長，段數 = 圖片數
+                seg_durations = [total_duration / len(image_paths)] * len(image_paths)
             return self._build_multi_segment_command(
                 image_paths, audio_paths, output_path, bpm,
-                audio_durations, encoder, crossfade_duration, bpms,
+                seg_durations, encoder, crossfade_duration, bpms,
                 face_params_list,
             )
 
@@ -361,7 +373,9 @@ class FFmpegRenderer:
         每段影片/音訊各自加上淡入淡出，再用 concat 串接。
         每段使用各自的 BPM 動態調整效果速度。
         """
-        n_segments = len(audio_paths)
+        # 段數由 audio_durations 決定（多圖時 = 圖片數，多音訊時 = 音訊數）
+        n_segments = len(audio_durations)
+        n_audio = len(audio_paths)
 
         # 超取樣設定
         oversample = 4
@@ -378,7 +392,17 @@ class FFmpegRenderer:
         # 分配圖片（循環）
         segment_images = [image_paths[i % len(image_paths)] for i in range(n_segments)]
 
+        # 判斷是否所有段都使用同一張圖片
+        # 若是，只需一個 -loop 1 -i 輸入，再用 split 分流給各段
+        # 避免多次開啟同一檔案導致後段出現黑畫面的 FFmpeg 問題
+        all_same_image = len(set(segment_images)) == 1
+
         filter_parts: List[str] = []
+
+        # 若同一張圖片多段使用，先用 split 分流
+        if all_same_image and n_segments > 1:
+            img_labels = "".join(f"[img{i}]" for i in range(n_segments))
+            filter_parts.append(f"[0:v]split={n_segments}{img_labels}")
 
         # --- 每段影片：獨立 zoompan（各自 BPM） ---
         cumulative_cycles = 0
@@ -399,8 +423,10 @@ class FFmpegRenderer:
             )
             # 每段加入個別淡入淡出
             seg_fade_out_start = max(0, seg_frames - fade_frames)
+            # 同一圖片用 split 分流的輸入標籤，否則直接用輸入索引
+            input_ref = f"[img{i}]" if all_same_image else f"[{i}:v]"
             filter_parts.append(
-                f"[{i}:v]format=yuv420p,"
+                f"{input_ref}format=yuv420p,"
                 f"scale={os_w}:{os_h}:flags=lanczos,"
                 f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}'"
                 f":d={seg_frames}:s={self.output_width}x{self.output_height}:fps={self.fps},"
@@ -420,24 +446,27 @@ class FFmpegRenderer:
                 f"{v_inputs}concat=n={n_segments}:v=1:a=0[v]"
             )
 
-        # --- 音訊處理（直接串接，只做整體首尾淡入淡出）---
-        audio_input_offset = n_segments  # 音訊輸入索引從圖片數量之後開始
+        # --- 音訊處理（首尾淡入淡出）---
+        # 同一張圖片用 split → 只有 1 個圖片輸入；不同圖片 → n_segments 個圖片輸入
+        n_image_inputs = 1 if all_same_image else n_segments
+        audio_input_offset = n_image_inputs  # 音訊輸入索引從圖片輸入數量之後開始
         audio_fade_dur = 1.5  # 整體首尾淡入淡出時長
         effective_audio = sum(audio_durations)
 
-        if n_segments == 1:
+        if n_audio == 1:
+            # 單首音訊 + 多張圖片：直接套用淡入淡出，橫跨整個影片
             aidx = audio_input_offset
-            fade_out_t = max(0.0, audio_durations[0] - audio_fade_dur)
+            fade_out_t = max(0.0, effective_audio - audio_fade_dur)
             filter_parts.append(
                 f"[{aidx}:a]afade=t=in:st=0:d={audio_fade_dur},"
                 f"afade=t=out:st={fade_out_t:.2f}:d={audio_fade_dur}[a]"
             )
         else:
-            # 所有段直接串接（段間無淡入淡出）
-            a_inputs = "".join(f"[{audio_input_offset + i}:a]" for i in range(n_segments))
+            # 多首音訊：直接串接（段間無淡入淡出），整體首尾淡入淡出
+            a_inputs = "".join(f"[{audio_input_offset + i}:a]" for i in range(n_audio))
             fade_out_t = max(0.0, effective_audio - audio_fade_dur)
             filter_parts.append(
-                f"{a_inputs}concat=n={n_segments}:v=0:a=1,"
+                f"{a_inputs}concat=n={n_audio}:v=0:a=1,"
                 f"afade=t=in:st=0:d={audio_fade_dur},"
                 f"afade=t=out:st={fade_out_t:.2f}:d={audio_fade_dur}[a]"
             )
@@ -447,9 +476,14 @@ class FFmpegRenderer:
         # --- 構建命令 ---
         cmd = [shutil.which("ffmpeg") or "ffmpeg", "-y"]
 
-        # 輸入：每段圖片（循環）
-        for img_path in segment_images:
-            cmd.extend(["-loop", "1", "-i", img_path])
+        # 輸入：圖片
+        if all_same_image:
+            # 同一張圖片：只需一個輸入，filter 內用 split 分流
+            cmd.extend(["-loop", "1", "-i", segment_images[0]])
+        else:
+            # 不同圖片（或部分不同）：各段各自獨立輸入
+            for img_path in segment_images:
+                cmd.extend(["-loop", "1", "-i", img_path])
 
         # 輸入：音訊
         for audio_path in audio_paths:
@@ -459,7 +493,9 @@ class FFmpegRenderer:
         cmd.extend(["-filter_complex", filter_complex])
 
         # 輸出映射
-        cmd.extend(["-map", "[v]", "-map", "[a]"])
+        cmd.extend(["-map", "[v]"])
+        if n_audio > 0:
+            cmd.extend(["-map", "[a]"])
 
         # 編碼設定
         cmd.extend(["-c:v", encoder])
@@ -468,7 +504,8 @@ class FFmpegRenderer:
         else:
             cmd.extend(["-preset", "medium", "-crf", "18"])
 
-        cmd.extend(["-c:a", "aac", "-b:a", "192k"])
+        if n_audio > 0:
+            cmd.extend(["-c:a", "aac", "-b:a", "192k"])
 
         # 時長限制（各段總和，無交叉縮減）
         effective_total = sum(audio_durations)
