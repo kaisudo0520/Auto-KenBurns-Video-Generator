@@ -318,12 +318,13 @@ class RenderService:
         if any(face_regions_list):
             from backend.services.kenburns_service import KenBurnsService
 
-            # 用第一首 BPM 計算 zoom_amp（與 build_zoompan_expr 一致）
+            # 用第一首 BPM 的中位數估算（非最大值），避免過度保守
+            # build_zoompan_expr 實際範圍: zoom=[0.04,0.25], x=[0.005,0.055], y=[0.003,0.038]
             ref_bpm = bpm
             ref_ratio = max(0.5, min(ref_bpm / 160.0, 1.5))
-            ref_zoom_amp = 0.08 + 0.17 * ref_ratio
-            ref_pan_x = 0.02 + 0.035 * ref_ratio
-            ref_pan_y = 0.014 + 0.024 * ref_ratio
+            ref_zoom_amp = 0.145 * ref_ratio   # 中位數 (0.04+0.25)/2
+            ref_pan_x = 0.03 * ref_ratio       # 中位數 (0.005+0.055)/2
+            ref_pan_y = 0.02 * ref_ratio        # 中位數 (0.003+0.038)/2
 
             face_params_list = []
             for regions in face_regions_list:

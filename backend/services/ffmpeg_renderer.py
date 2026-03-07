@@ -68,9 +68,10 @@ class FFmpegRenderer:
         - 自然的放大→持續→縮小→靜止 波形
 
         === XY 軸（水平/垂直平移） ===
-        3 層黃金比例頻率正弦疊加：
-        - 基頻 = 4 小節，權重 60% / 30% / 10%
-        - 振幅隨機 X:[0.005, 0.055] Y:[0.003, 0.038] × BPM比率
+        4 層黃金比例頻率正弦疊加：
+        - 基頻 = 4 小節，權重 50% / 25% / 15% / 10%
+        - 第 4 層高頻微擾增加軌跡突發方向變化
+        - 振幅隨機 X:[0.015, 0.08] Y:[0.01, 0.055] × BPM比率
         - X 用 sin、Y 用 cos → 橢圓軌跡
 
         === 微動 ===
@@ -113,9 +114,9 @@ class FFmpegRenderer:
         pan_period_frames = 4 * bar_duration * self.fps
         phi = 1.618033988749895  # 黃金比例
 
-        # 振幅隨機：每次渲染獨特的平移強度
-        pan_amp_x = random.uniform(0.005, 0.055) * clamped_ratio   # 水平
-        pan_amp_y = random.uniform(0.003, 0.038) * clamped_ratio   # 垂直（16:9）
+        # 振幅隨機：擴大範圍讓路徑更有張力
+        pan_amp_x = random.uniform(0.015, 0.08) * clamped_ratio   # 水平（提高下限+上限）
+        pan_amp_y = random.uniform(0.01, 0.055) * clamped_ratio    # 垂直（提高下限+上限）
 
         # === 臉部保護：鉗制平移振幅到安全範圍 ===
         cx_offset = 0.0
@@ -156,15 +157,17 @@ class FFmpegRenderer:
         # --- 縮放頻率 ---
         zf = 2 * math.pi / zoom_period_frames
 
-        # --- 平移頻率（3 層黃金比例）---
+        # --- 平移頻率（4 層黃金比例）---
         f1 = 2 * math.pi / pan_period_frames       # 基頻
         f2 = f1 * phi                               # ×φ
         f3 = f1 * phi * phi                         # ×φ²
+        f4 = f1 * phi * phi * phi                   # ×φ³（高頻微擾）
 
         # --- 相位 ---
         p1 = phase_base
         p2 = phase_base + 2.4     # 黃金角偏移
         p3 = phase_base + 4.8     # 2 × 黃金角偏移
+        p4 = phase_base + 7.2     # 3 × 黃金角偏移
 
         # --- 微動頻率（固定、互質）---
         mf_x = 0.013   # 週期 ≈ 16s at 30fps
@@ -180,13 +183,14 @@ class FFmpegRenderer:
         z_expr = f"1.0+{zoom_amp:.4f}*{zs}"
 
         # --- x: 水平平移表達式 ---
-        # 3 層 sin 疊加（60% + 30% + 10%）+ 微動
-        # XYZ 三軸統一模型：不再使用 pan_mod 抑制，三軸自由同時運動
+        # 4 層 sin 疊加（50% + 25% + 15% + 10%）+ 微動
+        # 第 4 層高頻微擾讓軌跡多一點突發方向變化，減少單調感
         # EMA 時間平滑：px + α×(target - px)
         x_pan = (
-            f"0.6*sin({f1:.8f}*on+{p1:.4f})"
-            f"+0.3*sin({f2:.8f}*on+{p2:.4f})"
-            f"+0.1*sin({f3:.8f}*on+{p3:.4f})"
+            f"0.5*sin({f1:.8f}*on+{p1:.4f})"
+            f"+0.25*sin({f2:.8f}*on+{p2:.4f})"
+            f"+0.15*sin({f3:.8f}*on+{p3:.4f})"
+            f"+0.1*sin({f4:.8f}*on+{p4:.4f})"
         )
         x_offset_term = f"+iw*{cx_offset:.6f}" if abs(cx_offset) > 0.001 else ""
         x_target = (
@@ -200,9 +204,10 @@ class FFmpegRenderer:
         # --- y: 垂直平移表達式 ---
         # 用 cos 而非 sin → X/Y 構成橢圓軌跡（非直線往復）
         y_pan = (
-            f"0.6*cos({f1:.8f}*on+{p1:.4f})"
-            f"+0.3*cos({f2:.8f}*on+{p2:.4f})"
-            f"+0.1*cos({f3:.8f}*on+{p3:.4f})"
+            f"0.5*cos({f1:.8f}*on+{p1:.4f})"
+            f"+0.25*cos({f2:.8f}*on+{p2:.4f})"
+            f"+0.15*cos({f3:.8f}*on+{p3:.4f})"
+            f"+0.1*cos({f4:.8f}*on+{p4:.4f})"
         )
         y_offset_term = f"+ih*{cy_offset:.6f}" if abs(cy_offset) > 0.001 else ""
         y_target = (

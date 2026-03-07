@@ -413,13 +413,13 @@ class KenBurnsService:
             h = bounds.get("height", 0)
 
             if region_type == "face":
-                # 臉部區域：向上擴展含髮型（臉高 × 0.5）
-                hair_expand = h * 0.5
+                # 只保護五官核心（不含頭髮），邊距縮小
+                face_margin = self.HEAD_SAFE_MARGIN * 0.5
                 face_region = (
-                    max(0, x - self.HEAD_SAFE_MARGIN),
-                    max(0, y - hair_expand - self.HEAD_SAFE_MARGIN),
-                    min(1.0, w + 2 * self.HEAD_SAFE_MARGIN),
-                    min(1.0, h + hair_expand + 2 * self.HEAD_SAFE_MARGIN),
+                    max(0, x - face_margin),
+                    max(0, y - face_margin),
+                    min(1.0, w + 2 * face_margin),
+                    min(1.0, h + 2 * face_margin),
                 )
             elif region_type == "head":
                 # 頭部區域特別保護
@@ -464,7 +464,7 @@ class KenBurnsService:
         default_pan_amp_x: float,
         default_pan_amp_y: float,
         zoom_amp: float,
-        margin: float = 0.03,
+        margin: float = 0.01,
     ) -> Optional[Dict]:
         """
         根據臉部偵測結果計算安全的平移參數
@@ -513,10 +513,10 @@ class KenBurnsService:
         cx_offset = face_cx - 0.5
         cy_offset = face_cy - 0.5
 
-        # 臉部半寬/半高（含髮型向上擴展 50%）
-        hair_expand = fh * 0.5
-        face_half_x = fw / 2
-        face_half_y = (fh + hair_expand) / 2
+        # 只保護五官核心區域（不含頭髮），換取更大動態範圍
+        # 五官大約佔臉部框的 60%（去除額頭髮際線和下巴邊緣）
+        face_half_x = fw / 2 * 0.6
+        face_half_y = fh / 2 * 0.6
 
         # 安全振幅鉗制：
         # viewport 半寬 = 0.5 / z_max（z_max 時 viewport 最小）
@@ -529,9 +529,9 @@ class KenBurnsService:
         max_safe_x = vp_half_x - face_half_x - margin - abs(cx_offset)
         max_safe_y = vp_half_y - face_half_y - margin - abs(cy_offset)
 
-        # 鉗制到最小值 0.005（完全不動太死板）
-        safe_pan_amp_x = min(default_pan_amp_x, max(0.005, max_safe_x))
-        safe_pan_amp_y = min(default_pan_amp_y, max(0.005, max_safe_y))
+        # 鉗制到最小值 0.01（保證最低限度的平移動感）
+        safe_pan_amp_x = min(default_pan_amp_x, max(0.01, max_safe_x))
+        safe_pan_amp_y = min(default_pan_amp_y, max(0.01, max_safe_y))
 
         logger.info(
             f"臉部安全參數: offset=({cx_offset:.3f}, {cy_offset:.3f}), "
