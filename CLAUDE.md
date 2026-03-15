@@ -196,16 +196,18 @@ All API routes are prefixed with `/api/v1/`:
 
 本專案使用 Claude Code 的多 Agent 協作框架：
 
-| Agent | 角色 | 職責 |
-|-------|------|------|
-| **Coder-PM** | 專案經理 | 需求分析、任務分派、協調各 Agent 協作 |
-| **Coder-Plan** | 技術架構師 | 撰寫規格書、技術方案設計 |
-| **Coder-Backend** | 後端開發者 | FastAPI 路由、服務層、FFmpeg 整合 |
-| **Coder-Bridge** | API 設計師 | 前後端介面規格、型別同步 |
-| **Coder-Database** | 資料庫專家 | 資料模型設計、Alembic 遷移、查詢優化 |
-| **Coder-Frontend** | 前端開發者 | Vue 3 元件、頁面、狀態管理（使用 frontend-design skill） |
-| **Coder-Test** | 測試工程師 | pytest / vitest 測試撰寫與執行 |
-| **Coder-Review** | 程式碼審查 | 品質檢查、安全審查、效能建議 |
-| **Coder-Debug** | 除錯專家 | 錯誤排查、日誌分析、效能瓶頸定位 |
+| Agent | 角色 | 職責 | 搭配 ECC 技能 |
+|-------|------|------|---------------|
+| **Coder-PM** | 專案經理 | 需求分析、任務分派、協調各 Agent 協作 | `plan`, `blueprint`, `search-first`, `verification-loop` |
+| **Coder-Plan** | 技術架構師 | 撰寫規格書、技術方案設計 | `planner`, `blueprint`, `backend-patterns`, `api-design` |
+| **Coder-Backend** | 後端開發者 | FastAPI 路由、服務層、FFmpeg 整合 | `python-patterns`, `backend-patterns`, `security-review`, `video-editing` |
+| **Coder-Bridge** | API 設計師 | 前後端介面規格、型別同步 | `api-design`, `coding-standards` |
+| **Coder-Database** | 資料庫專家 | 資料模型設計、Alembic 遷移、查詢優化 | `postgres-patterns`, `database-migrations` |
+| **Coder-Frontend** | 前端開發者 | Vue 3 元件、頁面、狀態管理 | `frontend-patterns`, `frontend-design`, `e2e-testing` |
+| **Coder-Test** | 測試工程師 | pytest / vitest 測試撰寫與執行 | `tdd`, `python-testing`, `tdd-workflow`, `e2e` |
+| **Coder-Review** | 程式碼審查 | 品質檢查、安全審查、效能建議 | `python-review`, `security-review`, `code-review` |
+| **Coder-Debug** | 除錯專家 | 錯誤排查、日誌分析、效能瓶頸定位 | `verification-loop`, `python-review` |
+
+> ECC 技能前綴：`/everything-claude-code:`，例如 `/everything-claude-code:plan`
 
 使用方式：`Use the coder-pm agent to build [feature description]`

@@ -83,6 +83,16 @@ backend/
 - 服務層使用 try/except 並記錄日誌
 - 保持與現有錯誤格式一致
 
+## 推薦技能（/everything-claude-code）
+
+| 技能 | 用途 | 觸發時機 |
+|------|------|----------|
+| `/everything-claude-code:python-patterns` | Python 慣用寫法 | 撰寫服務層邏輯時 |
+| `/everything-claude-code:backend-patterns` | 後端架構模式 | 設計 API 路由、中介軟體時 |
+| `/everything-claude-code:security-review` | 安全性檢查 | 處理使用者輸入、FFmpeg 命令時 |
+| `/everything-claude-code:video-editing` | 影片處理工作流 | FFmpeg 管線設計與最佳化 |
+| `/everything-claude-code:python-review` | Python 程式碼審查 | 完成後端程式碼後自我審查 |
+
 ## 重要原則
 
 1. **先讀後改**：修改前先閱讀相關的現有程式碼，遵循已有模式

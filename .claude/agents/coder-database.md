@@ -64,6 +64,13 @@ Project ──1:N──▶ RenderJob
 - 確保級聯刪除正確設定
 - 處理枚舉值的向後相容
 
+## 推薦技能（/everything-claude-code）
+
+| 技能 | 用途 | 觸發時機 |
+|------|------|----------|
+| `/everything-claude-code:postgres-patterns` | PostgreSQL 最佳化 | 查詢最佳化、索引設計、生產環境部署 |
+| `/everything-claude-code:database-migrations` | 遷移最佳實踐 | 撰寫 Alembic 遷移腳本、零停機部署 |
+
 ## 重要原則
 
 1. **SQLite 相容**：開發環境使用 SQLite，避免使用 PostgreSQL 特有語法（如 `ARRAY`、`JSONB`）

@@ -310,21 +310,27 @@ class RenderService:
         output_path = os.path.join(self.output_dir, f"{project.id}.mp4")
         os.makedirs(self.output_dir, exist_ok=True)
 
-        # 計算有效總時長（各段直接串接，無交叉縮減）
-        effective_total = sum(audio_durations) if len(audio_durations) > 1 else total_duration
+        # 計算有效總時長（xfade 交叉淡入淡出會縮減時長）
+        crossfade_dur = 1.0  # 與 build_command 的 crossfade_duration 一致
+        if len(audio_durations) > 1:
+            effective_total = FFmpegRenderer.compute_effective_duration(
+                audio_durations, crossfade_dur
+            )
+        else:
+            effective_total = total_duration
 
         # 計算每張圖片的臉部安全參數
         face_params_list = None
         if any(face_regions_list):
             from backend.services.kenburns_service import KenBurnsService
 
-            # 用第一首 BPM 的中位數估算（非最大值），避免過度保守
-            # build_zoompan_expr 實際範圍: zoom=[0.04,0.25], x=[0.005,0.055], y=[0.003,0.038]
+            # 用最大值估算（確保最大縮放時臉部仍受保護）
+            # build_zoompan_expr 實際範圍: zoom=[0.08,0.25], x=[0.015,0.08], y=[0.01,0.055]
             ref_bpm = bpm
             ref_ratio = max(0.5, min(ref_bpm / 160.0, 1.5))
-            ref_zoom_amp = 0.145 * ref_ratio   # 中位數 (0.04+0.25)/2
-            ref_pan_x = 0.03 * ref_ratio       # 中位數 (0.005+0.055)/2
-            ref_pan_y = 0.02 * ref_ratio        # 中位數 (0.003+0.038)/2
+            ref_zoom_amp = 0.25 * ref_ratio    # 最大值（保守估算，避免臉部被切到）
+            ref_pan_x = 0.08 * ref_ratio       # 最大值
+            ref_pan_y = 0.055 * ref_ratio      # 最大值
 
             face_params_list = []
             for regions in face_regions_list:

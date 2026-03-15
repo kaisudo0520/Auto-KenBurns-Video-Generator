@@ -54,6 +54,17 @@
 ### 簡單任務的快速通道
 對於小型修改（bug 修復、單一檔案調整），可跳過設計階段，直接調用對應的開發 Agent。
 
+## 推薦技能（/everything-claude-code）
+
+| 技能 | 用途 | 觸發時機 |
+|------|------|----------|
+| `/everything-claude-code:plan` | 結構化實作規劃 | 收到複雜需求時，在 Phase 2 前使用 |
+| `/everything-claude-code:blueprint` | 多 PR 藍圖生成 | 大型功能需拆分多個 session 時 |
+| `/everything-claude-code:search-first` | 研究現有方案 | Phase 1 需求分析時，搜尋可複用的實作 |
+| `/everything-claude-code:verification-loop` | 交付前驗證 | Phase 4 品質保證的最終確認 |
+
+> **使用方式**：在調用下游 Agent 前，先用對應技能取得結構化方案，再作為上下文傳遞。
+
 ## 協調原則
 
 1. **資訊傳遞**：調用下游 Agent 時，必須提供完整的上下文（需求描述、相關檔案路徑、前序 Agent 的產出摘要）

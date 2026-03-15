@@ -68,6 +68,13 @@
 ```
 新增 WebSocket 事件時，遵循此結構模式。
 
+## 推薦技能（/everything-claude-code）
+
+| 技能 | 用途 | 觸發時機 |
+|------|------|----------|
+| `/everything-claude-code:api-design` | REST API 設計模式 | 設計新端點、回應格式時 |
+| `/everything-claude-code:coding-standards` | TypeScript/JS 規範 | 同步前端型別定義時 |
+
 ## 設計原則
 
 1. **一致性優先**：新 API 必須遵循現有的命名慣例和回應格式

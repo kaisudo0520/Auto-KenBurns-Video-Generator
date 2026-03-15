@@ -25,6 +25,25 @@ class FFmpegRenderer:
         self.fps = fps
         self._process: Optional[asyncio.subprocess.Process] = None
 
+    @staticmethod
+    def compute_effective_duration(
+        audio_durations: List[float], crossfade_duration: float
+    ) -> float:
+        """
+        計算多段渲染的有效總時長（考慮 xfade 重疊縮減）
+
+        有效時長 = Σ(段時長) - (段數-1) × crossfade_duration
+
+        Args:
+            audio_durations: 每段的時長列表
+            crossfade_duration: 段間交叉淡入淡出時長
+
+        Returns:
+            有效總時長（秒）
+        """
+        n_xfades = max(0, len(audio_durations) - 1)
+        return sum(audio_durations) - n_xfades * crossfade_duration
+
     async def detect_encoder(self) -> str:
         """偵測可用的 H.264 編碼器，優先使用 NVENC"""
         ffmpeg_path = shutil.which("ffmpeg")
@@ -64,15 +83,16 @@ class FFmpegRenderer:
 
         === Z 軸（縮放/深度） ===
         慢速餘弦 + smootherstep 包絡：
-        - 週期 = 16 小節，振幅隨機 [0.04, 0.25] × BPM比率
+        - 週期 = 16 小節，振幅隨機 [0.08, 0.25] × BPM比率
         - 自然的放大→持續→縮小→靜止 波形
 
         === XY 軸（水平/垂直平移） ===
         4 層黃金比例頻率正弦疊加：
-        - 基頻 = 4 小節，權重 50% / 25% / 15% / 10%
+        - X 基頻 = 4 小節，Y 基頻 = 4.236 小節（微偏差，橢圓緩慢旋轉）
+        - 權重 50% / 25% / 15% / 10%
         - 第 4 層高頻微擾增加軌跡突發方向變化
         - 振幅隨機 X:[0.015, 0.08] Y:[0.01, 0.055] × BPM比率
-        - X 用 sin、Y 用 cos → 橢圓軌跡
+        - X 用 sin、Y 用 cos → 橢圓軌跡（因基頻微偏差，橢圓會緩慢旋轉）
 
         === 微動 ===
         固定低頻正弦（~0.2% 畫面振幅），模擬攝影機呼吸
@@ -107,12 +127,15 @@ class FFmpegRenderer:
         # 週期 = 16 小節（慢速呼吸感）
         zoom_period_frames = 16 * bar_duration * self.fps
         # 振幅隨機：每次渲染獨特的縮放強度
-        zoom_amp = random.uniform(0.04, 0.25) * clamped_ratio
+        # 下限 0.08（避免過低產生「似動非動」的尷尬效果）
+        zoom_amp = random.uniform(0.08, 0.25) * clamped_ratio
 
         # === XY 軸（平移）參數 ===
-        # 基頻週期 = 4 小節
-        pan_period_frames = 4 * bar_duration * self.fps
+        # X 基頻週期 = 4 小節，Y 基頻週期 = φ³ ≈ 4.236 小節（微偏差）
+        # Y 使用 φ³ 小節，讓 X/Y 基頻不同，橢圓軌跡緩慢旋轉
         phi = 1.618033988749895  # 黃金比例
+        pan_period_x_frames = 4 * bar_duration * self.fps
+        pan_period_y_frames = (phi ** 3) * bar_duration * self.fps
 
         # 振幅隨機：擴大範圍讓路徑更有張力
         pan_amp_x = random.uniform(0.015, 0.08) * clamped_ratio   # 水平（提高下限+上限）
@@ -149,7 +172,8 @@ class FFmpegRenderer:
             f"zoompan XYZ 參數: BPM={bpm:.0f}, ratio={bpm_ratio:.2f}, "
             f"Z_amp={zoom_amp:.3f}, X_amp={pan_amp_x:.4f}, Y_amp={pan_amp_y:.4f}, "
             f"zoom_period={zoom_period_frames/self.fps:.1f}s, "
-            f"pan_period={pan_period_frames/self.fps:.1f}s"
+            f"pan_period_x={pan_period_x_frames/self.fps:.1f}s, "
+            f"pan_period_y={pan_period_y_frames/self.fps:.1f}s"
         )
 
         # === FFmpeg 表達式構建 ===
@@ -158,10 +182,16 @@ class FFmpegRenderer:
         zf = 2 * math.pi / zoom_period_frames
 
         # --- 平移頻率（4 層黃金比例）---
-        f1 = 2 * math.pi / pan_period_frames       # 基頻
-        f2 = f1 * phi                               # ×φ
-        f3 = f1 * phi * phi                         # ×φ²
-        f4 = f1 * phi * phi * phi                   # ×φ³（高頻微擾）
+        # X 軸頻率
+        fx1 = 2 * math.pi / pan_period_x_frames      # X 基頻
+        fx2 = fx1 * phi                               # ×φ
+        fx3 = fx1 * phi * phi                         # ×φ²
+        fx4 = fx1 * phi * phi * phi                   # ×φ³（高頻微擾）
+        # Y 軸頻率（基頻微偏差，橢圓緩慢旋轉）
+        fy1 = 2 * math.pi / pan_period_y_frames      # Y 基頻
+        fy2 = fy1 * phi                               # ×φ
+        fy3 = fy1 * phi * phi                         # ×φ²
+        fy4 = fy1 * phi * phi * phi                   # ×φ³（高頻微擾）
 
         # --- 相位 ---
         p1 = phase_base
@@ -187,10 +217,10 @@ class FFmpegRenderer:
         # 第 4 層高頻微擾讓軌跡多一點突發方向變化，減少單調感
         # EMA 時間平滑：px + α×(target - px)
         x_pan = (
-            f"0.5*sin({f1:.8f}*on+{p1:.4f})"
-            f"+0.25*sin({f2:.8f}*on+{p2:.4f})"
-            f"+0.15*sin({f3:.8f}*on+{p3:.4f})"
-            f"+0.1*sin({f4:.8f}*on+{p4:.4f})"
+            f"0.5*sin({fx1:.8f}*on+{p1:.4f})"
+            f"+0.25*sin({fx2:.8f}*on+{p2:.4f})"
+            f"+0.15*sin({fx3:.8f}*on+{p3:.4f})"
+            f"+0.1*sin({fx4:.8f}*on+{p4:.4f})"
         )
         x_offset_term = f"+iw*{cx_offset:.6f}" if abs(cx_offset) > 0.001 else ""
         x_target = (
@@ -204,10 +234,10 @@ class FFmpegRenderer:
         # --- y: 垂直平移表達式 ---
         # 用 cos 而非 sin → X/Y 構成橢圓軌跡（非直線往復）
         y_pan = (
-            f"0.5*cos({f1:.8f}*on+{p1:.4f})"
-            f"+0.25*cos({f2:.8f}*on+{p2:.4f})"
-            f"+0.15*cos({f3:.8f}*on+{p3:.4f})"
-            f"+0.1*cos({f4:.8f}*on+{p4:.4f})"
+            f"0.5*cos({fy1:.8f}*on+{p1:.4f})"
+            f"+0.25*cos({fy2:.8f}*on+{p2:.4f})"
+            f"+0.15*cos({fy3:.8f}*on+{p3:.4f})"
+            f"+0.1*cos({fy4:.8f}*on+{p4:.4f})"
         )
         y_offset_term = f"+ih*{cy_offset:.6f}" if abs(cy_offset) > 0.001 else ""
         y_target = (
@@ -236,8 +266,8 @@ class FFmpegRenderer:
         """
         構建完整的 FFmpeg 命令
 
-        單段模式：1 張圖片 + 0~1 首音訊
-        多段模式：N 首音訊各配 1 張圖片，段間 xfade/acrossfade 交叉淡入淡出
+        單段模式：1 張圖片 + 0~1 首音訊（fade in/out）
+        多段模式：N 首音訊各配 1 張圖片，段間 xfade/acrossfade 交叉淡入淡出（無黑畫面）
 
         Args:
             image_paths: 圖片路徑列表
@@ -300,17 +330,9 @@ class FFmpegRenderer:
         )
 
         # 音訊濾鏡（加入淡入淡出）
+        # 單段模式入口條件保證 audio_paths <= 1，故只處理 0 或 1 首音訊
         audio_fade_dur = 1.5
-        if len(audio_paths) > 1:
-            audio_inputs = "".join(f"[{i+1}:a]" for i in range(len(audio_paths)))
-            fade_out_t = max(0, total_duration - audio_fade_dur)
-            audio_filter = (
-                f"{audio_inputs}concat=n={len(audio_paths)}:v=0:a=1,"
-                f"afade=t=in:st=0:d={audio_fade_dur},"
-                f"afade=t=out:st={fade_out_t:.2f}:d={audio_fade_dur}[a]"
-            )
-            filter_complex = f"{video_filter};{audio_filter}"
-        elif len(audio_paths) == 1:
+        if len(audio_paths) == 1:
             fade_out_t = max(0, total_duration - audio_fade_dur)
             audio_filter = (
                 f"[1:a]afade=t=in:st=0:d={audio_fade_dur},"
@@ -372,24 +394,37 @@ class FFmpegRenderer:
         face_params_list: Optional[List[Optional[Dict]]] = None,
     ) -> List[str]:
         """
-        構建多段 FFmpeg 命令：每首音訊配一張圖片，段間淡入淡出
+        構建多段 FFmpeg 命令：每首音訊配一張圖片，段間 xfade 交叉淡入淡出
 
         圖片循環分配：若圖片數 < 音訊數，圖片會循環使用。
-        每段影片/音訊各自加上淡入淡出，再用 concat 串接。
+        段間使用 xfade 交叉淡入淡出（無黑畫面），首段淡入 + 末段淡出。
         每段使用各自的 BPM 動態調整效果速度。
         """
         # 段數由 audio_durations 決定（多圖時 = 圖片數，多音訊時 = 音訊數）
         n_segments = len(audio_durations)
         n_audio = len(audio_paths)
 
+        # === 極短段時長防護 ===
+        # 當最短段 <= crossfade_duration 時，xfade offset 可能為 0 或負數，導致 FFmpeg 錯誤
+        # 自動降低 crossfade 為最短段的 50%，若 < 0.1 則設為 0（回退 concat 模式）
+        min_seg_duration = min(audio_durations) if audio_durations else 0.0
+        if min_seg_duration <= crossfade_duration and n_segments > 1:
+            adjusted = min_seg_duration * 0.5
+            if adjusted < 0.1:
+                adjusted = 0.0
+            logger.warning(
+                f"極短段防護: 最短段 {min_seg_duration:.2f}s <= crossfade {crossfade_duration:.2f}s, "
+                f"自動調降 crossfade 為 {adjusted:.2f}s"
+            )
+            crossfade_duration = adjusted
+
         # 超取樣設定
         oversample = 4
         os_w = self.output_width * oversample
         os_h = self.output_height * oversample
 
-        # 段間淡入淡出幀數（影片 1 秒、音訊 1 秒）
+        # 首段淡入 / 末段淡出（1 秒）
         fade_frames = self.fps
-        audio_fade_dur = 1.0
 
         # 每段 BPM（若未提供，全部使用同一個 bpm）
         seg_bpms = bpms if bpms and len(bpms) == n_segments else [bpm] * n_segments
@@ -426,39 +461,83 @@ class FFmpegRenderer:
                 seg_bpm, seg_frames, cycle_offset=cumulative_cycles,
                 face_params=seg_fp,
             )
-            # 每段加入個別淡入淡出
-            seg_fade_out_start = max(0, seg_frames - fade_frames)
             # 同一圖片用 split 分流的輸入標籤，否則直接用輸入索引
             input_ref = f"[img{i}]" if all_same_image else f"[{i}:v]"
+
+            # 單段或首末段加淡入淡出，中間段不加（由 xfade 處理過渡）
+            fade_filter = ""
+            if n_segments == 1:
+                # 單段：首尾都加
+                seg_fade_out_start = max(0, seg_frames - fade_frames)
+                fade_filter = f",fade=in:0:{fade_frames},fade=out:{seg_fade_out_start}:{fade_frames}"
+            elif i == 0:
+                # 首段：只加淡入
+                fade_filter = f",fade=in:0:{fade_frames}"
+            elif i == n_segments - 1:
+                # 末段：只加淡出
+                seg_fade_out_start = max(0, seg_frames - fade_frames)
+                fade_filter = f",fade=out:{seg_fade_out_start}:{fade_frames}"
+
             filter_parts.append(
                 f"{input_ref}format=yuv420p,"
                 f"scale={os_w}:{os_h}:flags=lanczos,"
                 f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}'"
-                f":d={seg_frames}:s={self.output_width}x{self.output_height}:fps={self.fps},"
-                f"fade=in:0:{fade_frames},fade=out:{seg_fade_out_start}:{fade_frames}[v{i}]"
+                f":d={seg_frames}:s={self.output_width}x{self.output_height}:fps={self.fps}"
+                f"{fade_filter}[v{i}]"
             )
             # 累計循環數量，確保下段相位不重複
             seg_bar_dur = 240.0 / max(seg_bpm, 1.0)
             seg_zoom_period = 16 * seg_bar_dur * self.fps
             cumulative_cycles += max(1, int(seg_frames / seg_zoom_period)) + 1
 
-        # --- 影片串接 (concat) ---
+        # --- 影片串接 ---
         if n_segments == 1:
             filter_parts.append("[v0]null[v]")
-        else:
+        elif crossfade_duration <= 0:
+            # crossfade 被降為 0：回退使用 concat 模式（保留各段 fade in/out）
             v_inputs = "".join(f"[v{i}]" for i in range(n_segments))
             filter_parts.append(
                 f"{v_inputs}concat=n={n_segments}:v=1:a=0[v]"
             )
+        elif n_segments == 2:
+            # 2 段：單次 xfade
+            xf_offset = max(0.0, audio_durations[0] - crossfade_duration)
+            filter_parts.append(
+                f"[v0][v1]xfade=transition=fade:duration={crossfade_duration:.2f}"
+                f":offset={xf_offset:.2f}[v]"
+            )
+        else:
+            # 多段：鏈式 xfade（[v0][v1]xfade→[vx0]; [vx0][v2]xfade→[vx1]; ...）
+            # 累計 offset = 前面所有段的時長 - 前面所有 xfade 的重疊
+            cumulative_time = audio_durations[0]
+            # 第一次 xfade
+            xf_offset = max(0.0, cumulative_time - crossfade_duration)
+            filter_parts.append(
+                f"[v0][v1]xfade=transition=fade:duration={crossfade_duration:.2f}"
+                f":offset={xf_offset:.2f}[vx0]"
+            )
+            # 後續 xfade
+            for j in range(2, n_segments):
+                # 前一段的結束時間 = 累計時間 + 本段時長 - 已累計的 xfade 重疊
+                cumulative_time += audio_durations[j - 1] - crossfade_duration
+                xf_offset = max(0.0, cumulative_time - crossfade_duration)
+                out_label = "[v]" if j == n_segments - 1 else f"[vx{j - 1}]"
+                filter_parts.append(
+                    f"[vx{j - 2}][v{j}]xfade=transition=fade:duration={crossfade_duration:.2f}"
+                    f":offset={xf_offset:.2f}{out_label}"
+                )
 
-        # --- 音訊處理（首尾淡入淡出）---
+        # --- 音訊處理 ---
         # 同一張圖片用 split → 只有 1 個圖片輸入；不同圖片 → n_segments 個圖片輸入
         n_image_inputs = 1 if all_same_image else n_segments
         audio_input_offset = n_image_inputs  # 音訊輸入索引從圖片輸入數量之後開始
         audio_fade_dur = 1.5  # 整體首尾淡入淡出時長
-        effective_audio = sum(audio_durations)
+        # 有效音訊時長（考慮 xfade 重疊縮減）
+        effective_audio = self.compute_effective_duration(audio_durations, crossfade_duration)
 
-        if n_audio == 1:
+        if n_audio == 0:
+            pass  # 無音訊，不處理
+        elif n_audio == 1:
             # 單首音訊 + 多張圖片：直接套用淡入淡出，橫跨整個影片
             aidx = audio_input_offset
             fade_out_t = max(0.0, effective_audio - audio_fade_dur)
@@ -466,13 +545,41 @@ class FFmpegRenderer:
                 f"[{aidx}:a]afade=t=in:st=0:d={audio_fade_dur},"
                 f"afade=t=out:st={fade_out_t:.2f}:d={audio_fade_dur}[a]"
             )
-        else:
-            # 多首音訊：直接串接（段間無淡入淡出），整體首尾淡入淡出
-            a_inputs = "".join(f"[{audio_input_offset + i}:a]" for i in range(n_audio))
+        elif crossfade_duration <= 0:
+            # crossfade 被降為 0：回退使用 concat 串接音訊 + 整體首尾 afade
+            a_inputs = "".join(f"[{audio_input_offset + j}:a]" for j in range(n_audio))
             fade_out_t = max(0.0, effective_audio - audio_fade_dur)
             filter_parts.append(
                 f"{a_inputs}concat=n={n_audio}:v=0:a=1,"
                 f"afade=t=in:st=0:d={audio_fade_dur},"
+                f"afade=t=out:st={fade_out_t:.2f}:d={audio_fade_dur}[a]"
+            )
+        elif n_audio == 2:
+            # 2 首音訊：acrossfade 交叉淡入淡出 + 整體首尾 afade
+            a0 = audio_input_offset
+            a1 = audio_input_offset + 1
+            fade_out_t = max(0.0, effective_audio - audio_fade_dur)
+            filter_parts.append(
+                f"[{a0}:a][{a1}:a]acrossfade=d={crossfade_duration:.2f}:c1=tri:c2=tri,"
+                f"afade=t=in:st=0:d={audio_fade_dur},"
+                f"afade=t=out:st={fade_out_t:.2f}:d={audio_fade_dur}[a]"
+            )
+        else:
+            # 多首音訊：鏈式 acrossfade + 整體首尾 afade
+            a0 = audio_input_offset
+            a1 = audio_input_offset + 1
+            filter_parts.append(
+                f"[{a0}:a][{a1}:a]acrossfade=d={crossfade_duration:.2f}:c1=tri:c2=tri[ax0]"
+            )
+            for j in range(2, n_audio):
+                aj = audio_input_offset + j
+                out_label = f"[ax{j - 1}]" if j < n_audio - 1 else "[ax_merged]"
+                filter_parts.append(
+                    f"[ax{j - 2}][{aj}:a]acrossfade=d={crossfade_duration:.2f}:c1=tri:c2=tri{out_label}"
+                )
+            fade_out_t = max(0.0, effective_audio - audio_fade_dur)
+            filter_parts.append(
+                f"[ax_merged]afade=t=in:st=0:d={audio_fade_dur},"
                 f"afade=t=out:st={fade_out_t:.2f}:d={audio_fade_dur}[a]"
             )
 
@@ -512,8 +619,8 @@ class FFmpegRenderer:
         if n_audio > 0:
             cmd.extend(["-c:a", "aac", "-b:a", "192k"])
 
-        # 時長限制（各段總和，無交叉縮減）
-        effective_total = sum(audio_durations)
+        # 時長限制（考慮 xfade 重疊縮減）
+        effective_total = self.compute_effective_duration(audio_durations, crossfade_duration)
         cmd.extend(["-t", f"{effective_total:.2f}"])
 
         # 進度回報
@@ -522,8 +629,10 @@ class FFmpegRenderer:
         # 輸出路徑
         cmd.append(output_path)
 
+        n_xfades = max(0, n_segments - 1)
         logger.info(
-            f"多段渲染: {n_segments} 段, 有效時長={effective_total:.1f}s"
+            f"多段渲染: {n_segments} 段, xfade={crossfade_duration:.1f}s×{n_xfades}, "
+            f"有效時長={effective_total:.1f}s"
         )
 
         return cmd

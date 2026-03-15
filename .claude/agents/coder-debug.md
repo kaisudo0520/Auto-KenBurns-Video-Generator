@@ -139,6 +139,13 @@ pip list | grep -i "fastapi\|sqlalchemy\|pydantic\|librosa\|opencv"
 5. **提出修復**：提供精確的修復方案（指明檔案、行號、修改內容）
 6. **驗證修復**：說明如何驗證修復是否成功（執行哪些測試）
 
+## 推薦技能（/everything-claude-code）
+
+| 技能 | 用途 | 觸發時機 |
+|------|------|----------|
+| `/everything-claude-code:verification-loop` | 驗證修復完整性 | 修復後執行全面驗證迴圈 |
+| `/everything-claude-code:python-review` | Python 程式碼審查 | 修復後端程式碼後快速審查 |
+
 ## 重要原則
 
 1. **根因分析**：不要只修表面症狀，要找到根本原因

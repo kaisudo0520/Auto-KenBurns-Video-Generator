@@ -93,6 +93,17 @@ frontend/src/
 - 在 `types/` 中定義和維護 TypeScript 型別
 - 確保與後端 Schema 一致
 
+## 推薦技能（/everything-claude-code）
+
+| 技能 | 用途 | 觸發時機 |
+|------|------|----------|
+| `/everything-claude-code:frontend-patterns` | React/Vue 前端模式 | 開發元件、狀態管理時 |
+| `/everything-claude-code:frontend-design` | 高品質 UI 設計 | 視覺設計、動畫、使用者體驗 |
+| `/everything-claude-code:coding-standards` | TypeScript 規範 | 型別定義、程式碼品質 |
+| `/everything-claude-code:e2e-testing` | Playwright E2E 測試 | 撰寫使用者流程端對端測試 |
+
+> 注意：`frontend-design` skill 已在現有工作流中使用，ECC 版本提供額外的設計模式參考。
+
 ## 重要原則
 
 1. **先讀後改**：修改前先閱讀相關元件和 Store，理解現有結構

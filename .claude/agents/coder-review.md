@@ -67,6 +67,15 @@
 - **Warning**：建議修復（效能問題、潛在 bug、不一致）
 - **Info**：可選改進（程式碼風格、可讀性、最佳實踐）
 
+## 推薦技能（/everything-claude-code）
+
+| 技能 | 用途 | 觸發時機 |
+|------|------|----------|
+| `/everything-claude-code:python-review` | Python 程式碼審查 | 審查後端 Python 程式碼 |
+| `/everything-claude-code:security-review` | 安全漏洞偵測 | 審查認證、使用者輸入、API 端點 |
+| `/everything-claude-code:security-scan` | 組態安全掃描 | 審查 .claude/ 目錄安全性 |
+| `/everything-claude-code:code-review` | 通用程式碼審查 | 全面品質審查（含前後端） |
+
 ## 審查原則
 
 1. **聚焦重點**：優先報告 Critical 和 Warning，Info 級別不超過 5 個

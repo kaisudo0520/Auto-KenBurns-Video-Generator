@@ -47,6 +47,16 @@
 - 考慮與現有程式碼的一致性
 - 優先使用已有的依賴和模式，避免引入不必要的新依賴
 
+## 推薦技能（/everything-claude-code）
+
+| 技能 | 用途 | 觸發時機 |
+|------|------|----------|
+| `/everything-claude-code:planner` | 深度實作規劃 | 複雜功能的詳細分解 |
+| `/everything-claude-code:blueprint` | 多階段藍圖 | 跨多 PR 的大型功能設計 |
+| `/everything-claude-code:backend-patterns` | 後端架構參考 | 設計 FastAPI/Node.js 架構時 |
+| `/everything-claude-code:api-design` | REST API 設計模式 | 設計新 API 端點時 |
+| `/everything-claude-code:search-first` | 方案搜尋 | 設計前搜尋現有最佳實踐 |
+
 ## 設計原則
 
 1. **先讀後寫**：設計前必須閱讀相關的現有程式碼，理解慣例再動筆

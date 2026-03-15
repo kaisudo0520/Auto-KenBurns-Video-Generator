@@ -66,6 +66,16 @@
 - **快速渲染 API**：檔案上傳驗證、時長計算、任務啟動
 - **WebSocket 訊息**：進度更新、完成/錯誤事件
 
+## 推薦技能（/everything-claude-code）
+
+| 技能 | 用途 | 觸發時機 |
+|------|------|----------|
+| `/everything-claude-code:tdd` | TDD 工作流 | 新功能開發時，強制先寫測試 |
+| `/everything-claude-code:python-testing` | pytest 測試模式 | 撰寫後端測試、fixture、mock |
+| `/everything-claude-code:tdd-workflow` | 完整 TDD 流程 | 需要 80%+ 覆蓋率驗證時 |
+| `/everything-claude-code:e2e` | E2E 測試生成與執行 | 撰寫 Playwright 端對端測試 |
+| `/everything-claude-code:e2e-testing` | Playwright 測試模式 | E2E 測試架構、CI/CD 整合 |
+
 ## 測試原則
 
 1. **先讀後寫**：撰寫測試前先閱讀被測程式碼和 `conftest.py`，遵循現有模式

@@ -101,8 +101,8 @@ class TestBuildCommandMultiSegment:
         filter_complex = cmd[fc_idx + 1]
         assert f"d={expected_frames}" in filter_complex
 
-    def test_multi_image_single_audio_concat_video_segments(self):
-        """多圖 + 1 音訊 → filter_complex 包含 concat 串接影片段"""
+    def test_multi_image_single_audio_xfade_video_segments(self):
+        """多圖 + 1 音訊 → filter_complex 包含 xfade 交叉淡入淡出"""
         cmd = self.renderer.build_command(
             image_paths=[self.img1, self.img2],
             audio_paths=[self.audio1],
@@ -114,8 +114,8 @@ class TestBuildCommandMultiSegment:
         )
         fc_idx = cmd.index("-filter_complex")
         filter_complex = cmd[fc_idx + 1]
-        # 應有 concat=n=2:v=1:a=0 的影片串接
-        assert "concat=n=2:v=1:a=0" in filter_complex
+        # 應有 xfade 交叉淡入淡出（取代 concat，無黑畫面過渡）
+        assert "xfade=transition=fade" in filter_complex
 
     def test_multi_image_single_audio_single_audio_input(self):
         """多圖 + 1 音訊 → FFmpeg 命令只有 1 個音訊 -i 輸入"""
@@ -144,10 +144,10 @@ class TestBuildCommandMultiSegment:
         )
         fc_idx = cmd.index("-filter_complex")
         filter_complex = cmd[fc_idx + 1]
-        # 2 首音訊 → 2 段 → concat=n=2
-        assert "concat=n=2:v=1:a=0" in filter_complex
-        # 音訊串接 2 首
-        assert "concat=n=2:v=0:a=1" in filter_complex
+        # 2 段 → xfade 交叉淡入淡出
+        assert "xfade=transition=fade" in filter_complex
+        # 2 首音訊 → acrossfade 交叉淡入淡出
+        assert "acrossfade=" in filter_complex
 
 
 class TestSingleImageMultiAudioSplit:
@@ -312,3 +312,126 @@ class TestBuildZoompanExpr:
         assert isinstance(z1, str)
         assert isinstance(x1, str)
         assert isinstance(y1, str)
+
+
+class TestXfadeChainAndShortSegment:
+    """測試 3+ 段 xfade 鏈式建構與極短段防護"""
+
+    def setup_method(self):
+        self.renderer = FFmpegRenderer(output_width=1920, output_height=1080, fps=30)
+        self.img1 = "/tmp/img1.jpg"
+        self.img2 = "/tmp/img2.jpg"
+        self.img3 = "/tmp/img3.jpg"
+        self.audio1 = "/tmp/audio1.mp3"
+        self.audio2 = "/tmp/audio2.mp3"
+        self.audio3 = "/tmp/audio3.mp3"
+
+    def test_three_different_images_xfade_chain(self):
+        """3 張不同圖 + 3 音訊 → 鏈式 xfade: [v0][v1]xfade→[vx0]; [vx0][v2]xfade→[v]"""
+        cmd = self.renderer.build_command(
+            image_paths=[self.img1, self.img2, self.img3],
+            audio_paths=[self.audio1, self.audio2, self.audio3],
+            output_path="/tmp/out.mp4",
+            bpm=120.0,
+            total_duration=90.0,
+            encoder="libx264",
+            audio_durations=[30.0, 30.0, 30.0],
+        )
+        fc_idx = cmd.index("-filter_complex")
+        filter_complex = cmd[fc_idx + 1]
+        # 應有鏈式 xfade
+        assert "[v0][v1]xfade=transition=fade" in filter_complex
+        assert "[vx0][v2]xfade=transition=fade" in filter_complex
+        # 最後一個 xfade 的輸出應為 [v]
+        assert "[v]" in filter_complex
+        # 不應使用 split（3 張不同圖片）
+        assert "split=" not in filter_complex
+
+    def test_three_segments_audio_chain_acrossfade(self):
+        """3 首音訊 → 鏈式 acrossfade"""
+        cmd = self.renderer.build_command(
+            image_paths=[self.img1, self.img2, self.img3],
+            audio_paths=[self.audio1, self.audio2, self.audio3],
+            output_path="/tmp/out.mp4",
+            bpm=120.0,
+            total_duration=90.0,
+            encoder="libx264",
+            audio_durations=[30.0, 30.0, 30.0],
+        )
+        fc_idx = cmd.index("-filter_complex")
+        filter_complex = cmd[fc_idx + 1]
+        # 應有鏈式 acrossfade
+        assert "acrossfade=" in filter_complex
+        assert "[ax0]" in filter_complex
+        assert "[ax_merged]" in filter_complex
+
+    def test_short_segment_auto_reduces_crossfade(self):
+        """極短段（0.5s）→ crossfade 自動降低為 0.25s"""
+        cmd = self.renderer.build_command(
+            image_paths=[self.img1, self.img2],
+            audio_paths=[self.audio1, self.audio2],
+            output_path="/tmp/out.mp4",
+            bpm=120.0,
+            total_duration=30.5,
+            encoder="libx264",
+            audio_durations=[30.0, 0.5],
+            crossfade_duration=1.0,
+        )
+        fc_idx = cmd.index("-filter_complex")
+        filter_complex = cmd[fc_idx + 1]
+        # crossfade 應被降至 0.25s（0.5 × 0.5）
+        assert "duration=0.25" in filter_complex
+
+    def test_very_short_segment_fallback_concat(self):
+        """極短段（0.1s）→ crossfade 降至 0，回退 concat 模式"""
+        cmd = self.renderer.build_command(
+            image_paths=[self.img1, self.img2],
+            audio_paths=[self.audio1, self.audio2],
+            output_path="/tmp/out.mp4",
+            bpm=120.0,
+            total_duration=30.1,
+            encoder="libx264",
+            audio_durations=[30.0, 0.1],
+            crossfade_duration=1.0,
+        )
+        fc_idx = cmd.index("-filter_complex")
+        filter_complex = cmd[fc_idx + 1]
+        # crossfade=0 → 應使用 concat 而非 xfade
+        assert "concat=n=2:v=1:a=0" in filter_complex
+        assert "xfade" not in filter_complex
+
+    def test_very_short_segment_audio_fallback_concat(self):
+        """極短段（0.1s）→ 音訊也回退 concat 模式"""
+        cmd = self.renderer.build_command(
+            image_paths=[self.img1, self.img2],
+            audio_paths=[self.audio1, self.audio2],
+            output_path="/tmp/out.mp4",
+            bpm=120.0,
+            total_duration=30.1,
+            encoder="libx264",
+            audio_durations=[30.0, 0.1],
+            crossfade_duration=1.0,
+        )
+        fc_idx = cmd.index("-filter_complex")
+        filter_complex = cmd[fc_idx + 1]
+        # 音訊也應使用 concat 而非 acrossfade
+        assert "concat=n=2:v=0:a=1" in filter_complex
+        assert "acrossfade" not in filter_complex
+
+    def test_compute_effective_duration_static_method(self):
+        """compute_effective_duration 靜態方法正確計算有效時長"""
+        # 3 段 × 30s，crossfade=1.0 → 有效時長 = 90 - 2×1 = 88
+        result = FFmpegRenderer.compute_effective_duration(
+            [30.0, 30.0, 30.0], 1.0
+        )
+        assert result == 88.0
+
+        # 1 段 → 無 xfade → 有效時長 = 原始時長
+        result = FFmpegRenderer.compute_effective_duration([30.0], 1.0)
+        assert result == 30.0
+
+        # crossfade=0 → 有效時長 = 總時長
+        result = FFmpegRenderer.compute_effective_duration(
+            [10.0, 20.0], 0.0
+        )
+        assert result == 30.0
