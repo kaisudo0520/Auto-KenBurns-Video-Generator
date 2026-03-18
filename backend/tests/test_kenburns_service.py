@@ -453,6 +453,125 @@ class TestEffectType:
             assert hasattr(EffectType, type_name)
 
 
+class TestComputeFaceSafeParams:
+    """測試臉部安全參數計算（含 Overscan offset 鉗制）"""
+
+    @staticmethod
+    def _make_face_region(cx: float, cy: float, w: float = 0.15, h: float = 0.20):
+        """建立臉部區域（cx/cy 為中心座標）"""
+        return [{
+            "type": "face",
+            "bounds": {"x": cx - w / 2, "y": cy - h / 2, "width": w, "height": h},
+            "confidence": 0.95,
+        }]
+
+    def test_center_face_no_clamp(self):
+        """臉部在中心時，offset 應為 ~0，不鉗制"""
+        regions = self._make_face_region(0.5, 0.5)
+        result = KenBurnsService.compute_face_safe_params(
+            subject_regions=regions,
+            default_pan_amp_x=0.08, default_pan_amp_y=0.05,
+            zoom_amp=0.20,
+        )
+        assert result is not None
+        assert abs(result["cx_offset"]) < 0.01
+        assert abs(result["cy_offset"]) < 0.01
+
+    def test_edge_face_offset_clamped(self):
+        """臉部在邊緣時，offset 應被鉗制到安全範圍"""
+        regions = self._make_face_region(0.9, 0.5)
+        result = KenBurnsService.compute_face_safe_params(
+            subject_regions=regions,
+            default_pan_amp_x=0.08, default_pan_amp_y=0.05,
+            zoom_amp=0.20,
+        )
+        assert result is not None
+        # 原始 cx_offset = 0.9 - 0.5 = 0.4，應被鉗制
+        assert result["cx_offset"] < 0.4
+        # offset 不應為負（臉在右邊，偏移也應朝右或為 0）
+        assert result["cx_offset"] >= 0.0
+
+    def test_left_edge_face_offset_clamped(self):
+        """臉部在左邊緣時，cx_offset 應被鉗制為負值但在安全範圍內"""
+        regions = self._make_face_region(0.08, 0.5)
+        result = KenBurnsService.compute_face_safe_params(
+            subject_regions=regions,
+            default_pan_amp_x=0.08, default_pan_amp_y=0.05,
+            zoom_amp=0.20,
+        )
+        assert result is not None
+        # 原始 cx_offset = 0.08 - 0.5 = -0.42
+        assert result["cx_offset"] > -0.42
+        assert result["cx_offset"] <= 0.0
+
+    def test_corner_face_both_axes_clamped(self):
+        """臉部在角落時，雙軸都應被鉗制"""
+        regions = self._make_face_region(0.9, 0.9)
+        result = KenBurnsService.compute_face_safe_params(
+            subject_regions=regions,
+            default_pan_amp_x=0.08, default_pan_amp_y=0.05,
+            zoom_amp=0.20,
+        )
+        assert result is not None
+        # 原始 offset = (0.4, 0.4)，應被大幅鉗制
+        assert result["cx_offset"] < 0.4
+        assert result["cy_offset"] < 0.4
+
+    def test_offset_clamped_within_boundary(self):
+        """offset 應被鉗制到安全範圍（pan_amp 最低限 0.01 可能略超邊界，屬預期行為）"""
+        base_zoom = 1.15
+        micro_amp = 0.002
+
+        for cx in [0.1, 0.3, 0.5, 0.7, 0.9]:
+            regions = self._make_face_region(cx, 0.5)
+            result = KenBurnsService.compute_face_safe_params(
+                subject_regions=regions,
+                default_pan_amp_x=0.10, default_pan_amp_y=0.07,
+                zoom_amp=0.28,
+            )
+            if result is None:
+                continue
+            z_min = max(1.0, base_zoom - 0.28 / 2.0)
+            max_offset = max(0.0,
+                             0.5 * (1.0 - 1.0 / z_min)
+                             - result["safe_pan_amp_x"] - micro_amp)
+            # offset 本身必須在鉗制範圍內
+            assert abs(result["cx_offset"]) <= max_offset + 0.001, (
+                f"cx={cx}: |offset|={abs(result['cx_offset']):.4f} > max={max_offset:.4f}"
+            )
+
+    def test_large_zoom_amp_tight_offset(self):
+        """大 zoom_amp 讓 z_min 接近 1.0，offset 應幾乎為 0"""
+        regions = self._make_face_region(0.8, 0.5)
+        result = KenBurnsService.compute_face_safe_params(
+            subject_regions=regions,
+            default_pan_amp_x=0.10, default_pan_amp_y=0.07,
+            zoom_amp=0.28,  # z_min = 1.15 - 0.14 = 1.01
+        )
+        assert result is not None
+        # z_min ≈ 1.01，overscan 裕度極小，offset 應被大幅鉗制
+        assert abs(result["cx_offset"]) < 0.02
+
+    def test_no_faces_returns_none(self):
+        """無臉部時應回傳 None"""
+        result = KenBurnsService.compute_face_safe_params(
+            subject_regions=[],
+            default_pan_amp_x=0.08, default_pan_amp_y=0.05,
+            zoom_amp=0.20,
+        )
+        assert result is None
+
+    def test_non_face_type_returns_none(self):
+        """只有 body 類型（非 face）時應回傳 None"""
+        regions = [{"type": "body", "bounds": {"x": 0.3, "y": 0.2, "width": 0.4, "height": 0.6}, "confidence": 0.9}]
+        result = KenBurnsService.compute_face_safe_params(
+            subject_regions=regions,
+            default_pan_amp_x=0.08, default_pan_amp_y=0.05,
+            zoom_amp=0.20,
+        )
+        assert result is None
+
+
 # 整合測試 - 端到端流程
 class TestEndToEnd:
     """端到端流程測試"""

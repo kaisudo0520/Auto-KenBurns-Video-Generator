@@ -522,7 +522,9 @@ class KenBurnsService:
         # viewport 半寬 = 0.5 / z_max（z_max 時 viewport 最小）
         # 最大平移時，臉部邊緣必須在 viewport 內
         # max_safe_pan = viewport_half - face_half - margin - |offset|
-        z_max = 1.0 + zoom_amp
+        # 雙向縮放模式：base_zoom=1.15, z_max = base_zoom + amp/2
+        base_zoom = 1.15
+        z_max = base_zoom + zoom_amp / 2.0
         vp_half_x = 0.5 / z_max
         vp_half_y = 0.5 / z_max
 
@@ -533,10 +535,30 @@ class KenBurnsService:
         safe_pan_amp_x = min(default_pan_amp_x, max(0.01, max_safe_x))
         safe_pan_amp_y = min(default_pan_amp_y, max(0.01, max_safe_y))
 
+        # === Overscan 邊界保護：鉗制 offset 到安全範圍 ===
+        # 在 z_min（zoom out 到最大 viewport）時，offset + pan + micro 不能超出圖片邊界
+        # 安全上限 = 0.5 × (1 - 1/z_min) - safe_pan_amp - micro_amp
+        # z_min = base_zoom - amp/2（雙向縮放的最小值）
+        z_min = max(1.0, base_zoom - zoom_amp / 2.0)
+        micro_amp = 0.002  # 與 ffmpeg_renderer.py 中的 micro_amp 一致
+        max_offset_x = max(0.0, 0.5 * (1.0 - 1.0 / z_min) - safe_pan_amp_x - micro_amp)
+        max_offset_y = max(0.0, 0.5 * (1.0 - 1.0 / z_min) - safe_pan_amp_y - micro_amp)
+
+        original_cx = cx_offset
+        original_cy = cy_offset
+        cx_offset = max(-max_offset_x, min(max_offset_x, cx_offset))
+        cy_offset = max(-max_offset_y, min(max_offset_y, cy_offset))
+
+        offset_clamped = (abs(cx_offset - original_cx) > 0.001
+                          or abs(cy_offset - original_cy) > 0.001)
+
         logger.info(
-            f"臉部安全參數: offset=({cx_offset:.3f}, {cy_offset:.3f}), "
+            f"臉部安全參數: offset=({cx_offset:.3f}, {cy_offset:.3f})"
+            f"{' [鉗制]' if offset_clamped else ''}"
+            f" ← 原始({original_cx:.3f}, {original_cy:.3f}), "
             f"pan_amp=({safe_pan_amp_x:.4f}, {safe_pan_amp_y:.4f}) "
-            f"← 原始({default_pan_amp_x:.4f}, {default_pan_amp_y:.4f})"
+            f"← 原始({default_pan_amp_x:.4f}, {default_pan_amp_y:.4f}), "
+            f"z=[{z_min:.3f}, {z_max:.3f}], max_offset=({max_offset_x:.4f}, {max_offset_y:.4f})"
         )
 
         return {

@@ -75,30 +75,33 @@ class FFmpegRenderer:
         """
         根據 BPM 構建 XYZ 三軸統一運動的 zoompan 表達式
 
-        設計理念（統一 3D 攝影機模型）：
+        設計理念（統一 3D 攝影機模型 + Overscan 雙向縮放）：
+        - base_zoom=1.15 讓圖片初始就只顯示 ~85%，多出 15% 為移動緩衝區
         - XYZ 三軸同時驅動，形成 3D Lissajous 軌跡
+        - 雙向縮放：z = base_zoom ± amp/2（zoom in + zoom out）
         - 各軸振幅在範圍內隨機取值 → 每次渲染獨特
         - 某軸振幅接近 0 時自然退化為雙軸或單軸運動
         - 多頻黃金比例正弦疊加，軌跡永不重複
 
         === Z 軸（縮放/深度） ===
-        慢速餘弦 + smootherstep 包絡：
-        - 週期 = 16 小節，振幅隨機 [0.08, 0.25] × BPM比率
-        - 自然的放大→持續→縮小→靜止 波形
+        雙向餘弦 + smootherstep 包絡：
+        - 週期 = 10 小節，振幅隨機 [0.10, 0.28] × BPM比率
+        - z = base_zoom + amp × (smootherstep - 0.5) → 雙向縮放
+        - 安全約束：z_min >= 1.0（不會 zoom out 到露出黑邊）
 
         === XY 軸（水平/垂直平移） ===
         4 層黃金比例頻率正弦疊加：
-        - X 基頻 = 4 小節，Y 基頻 = 4.236 小節（微偏差，橢圓緩慢旋轉）
+        - X 基頻 = 2.5 小節，Y 基頻 = 2.648 小節（微偏差，橢圓緩慢旋轉）
         - 權重 50% / 25% / 15% / 10%
         - 第 4 層高頻微擾增加軌跡突發方向變化
-        - 振幅隨機 X:[0.015, 0.08] Y:[0.01, 0.055] × BPM比率
+        - 振幅隨機 X:[0.02, 0.10] Y:[0.015, 0.07] × BPM比率
         - X 用 sin、Y 用 cos → 橢圓軌跡（因基頻微偏差，橢圓會緩慢旋轉）
 
         === 微動 ===
         固定低頻正弦（~0.2% 畫面振幅），模擬攝影機呼吸
 
         === 抖動消除 ===
-        1. EMA 時間平滑（α=0.12）：一階 IIR 低通濾波
+        1. EMA 時間平滑（α=0.18）：一階 IIR 低通濾波
         2. 4x 超取樣 + Lanczos：捨入誤差降至 0.25px
 
         === 臉部保護 ===
@@ -123,23 +126,29 @@ class FFmpegRenderer:
         # 一小節 = 4 拍，時長 = 240 / BPM 秒
         bar_duration = 240.0 / bpm
 
+        # === Overscan 基礎縮放（雙向縮放的基準點）===
+        # base_zoom > 1.0 讓圖片在「靜止狀態」就只顯示 ~85%，
+        # 多出的 15% 成為移動緩衝區，允許 zoom out + zoom in + 全程平移
+        base_zoom = 1.15
+
         # === Z 軸（縮放）參數 ===
-        # 週期 = 16 小節（慢速呼吸感）
-        zoom_period_frames = 16 * bar_duration * self.fps
-        # 振幅隨機：每次渲染獨特的縮放強度
-        # 下限 0.08（避免過低產生「似動非動」的尷尬效果）
-        zoom_amp = random.uniform(0.08, 0.25) * clamped_ratio
+        # 週期 = 10 小節（加快節奏，原 16 小節太慢）
+        zoom_period_frames = 10 * bar_duration * self.fps
+        # 振幅隨機：每次渲染獨特的縮放強度（半振幅，雙向展開）
+        # 實際 z 範圍 = [base_zoom - amp/2, base_zoom + amp/2]
+        # 安全約束：base_zoom - amp/2 >= 1.0 → amp <= 2*(base_zoom-1.0) = 0.30
+        zoom_amp = random.uniform(0.10, 0.28) * clamped_ratio
 
         # === XY 軸（平移）參數 ===
-        # X 基頻週期 = 4 小節，Y 基頻週期 = φ³ ≈ 4.236 小節（微偏差）
-        # Y 使用 φ³ 小節，讓 X/Y 基頻不同，橢圓軌跡緩慢旋轉
+        # X 基頻週期 = 2.5 小節（加快平移節奏，原 4 小節太慢）
+        # Y 基頻週期 = φ³ × 0.625 ≈ 2.648 小節（保持微偏差，橢圓緩慢旋轉）
         phi = 1.618033988749895  # 黃金比例
-        pan_period_x_frames = 4 * bar_duration * self.fps
-        pan_period_y_frames = (phi ** 3) * bar_duration * self.fps
+        pan_period_x_frames = 2.5 * bar_duration * self.fps
+        pan_period_y_frames = (phi ** 3) * 0.625 * bar_duration * self.fps
 
         # 振幅隨機：擴大範圍讓路徑更有張力
-        pan_amp_x = random.uniform(0.015, 0.08) * clamped_ratio   # 水平（提高下限+上限）
-        pan_amp_y = random.uniform(0.01, 0.055) * clamped_ratio    # 垂直（提高下限+上限）
+        pan_amp_x = random.uniform(0.02, 0.10) * clamped_ratio    # 水平（提高上限，配合 overscan 更大空間）
+        pan_amp_y = random.uniform(0.015, 0.07) * clamped_ratio    # 垂直（提高上限，配合 overscan 更大空間）
 
         # === 臉部保護：鉗制平移振幅到安全範圍 ===
         cx_offset = 0.0
@@ -159,10 +168,10 @@ class FFmpegRenderer:
 
         # === EMA 時間平滑（消除幀間抖動）===
         # 利用 FFmpeg zoompan 的 px/py（前幀座標）實現一階 IIR 低通濾波
-        # alpha = 0.12: 時間常數 ≈ 8 幀（0.27s@30fps），90% 收斂 ≈ 18 幀（0.6s）
-        # - 保留低頻主運動（基頻衰減 <3%、二次頻 <7%）
-        # - 消除 trunc() 階梯跳躍、pan_mod 速度突變等幀間不連續
-        ema_alpha = 0.12
+        # alpha = 0.18: 時間常數 ≈ 5 幀（0.17s@30fps），90% 收斂 ≈ 12 幀（0.4s）
+        # - 提高 alpha 讓運動更即時（配合加快的週期）
+        # - 仍可消除 trunc() 階梯跳躍等幀間不連續
+        ema_alpha = 0.18
 
         # === 相位偏移（多段連續性）===
         # cycle_offset × 黃金角(2.4 rad) 確保每段方向不重複
@@ -170,7 +179,9 @@ class FFmpegRenderer:
 
         logger.debug(
             f"zoompan XYZ 參數: BPM={bpm:.0f}, ratio={bpm_ratio:.2f}, "
-            f"Z_amp={zoom_amp:.3f}, X_amp={pan_amp_x:.4f}, Y_amp={pan_amp_y:.4f}, "
+            f"base_zoom={base_zoom:.2f}, Z_amp={zoom_amp:.3f} "
+            f"(z=[{base_zoom - zoom_amp/2:.3f}, {base_zoom + zoom_amp/2:.3f}]), "
+            f"X_amp={pan_amp_x:.4f}, Y_amp={pan_amp_y:.4f}, "
             f"zoom_period={zoom_period_frames/self.fps:.1f}s, "
             f"pan_period_x={pan_period_x_frames/self.fps:.1f}s, "
             f"pan_period_y={pan_period_y_frames/self.fps:.1f}s"
@@ -205,12 +216,19 @@ class FFmpegRenderer:
         mp_x = phase_base * 0.7   # 微動相位
         mp_y = phase_base * 1.3
 
-        # --- z: 縮放表達式 ---
-        # (1 - cos(ω·on + φ)) / 2 → 0→1→0 的平滑鐘形包絡
-        # smootherstep 壓扁過渡區：~35% 時間在 <10% zoom（純平移）
+        # --- z: 雙向縮放表達式 ---
+        # base_zoom + amp × (smootherstep(raw) - 0.5)
+        # smootherstep 輸出 0→1，偏移 -0.5 後變 -0.5→+0.5 = 雙向
+        # 安全鉗制：確保 z_min >= 1.0（不會 zoom out 到露出黑邊）
+        half_amp = zoom_amp / 2.0
+        z_min = base_zoom - half_amp
+        if z_min < 1.0:
+            # 自動收縮振幅，確保不低於 1.0
+            half_amp = base_zoom - 1.0
+            zoom_amp = half_amp * 2.0
         tz = f"((1-cos({zf:.8f}*on+{p1:.4f}))/2)"
         zs = f"(6*pow({tz},5)-15*pow({tz},4)+10*pow({tz},3))"
-        z_expr = f"1.0+{zoom_amp:.4f}*{zs}"
+        z_expr = f"{base_zoom:.4f}+{zoom_amp:.4f}*({zs}-0.5)"
 
         # --- x: 水平平移表達式 ---
         # 4 層 sin 疊加（50% + 25% + 15% + 10%）+ 微動
@@ -487,7 +505,7 @@ class FFmpegRenderer:
             )
             # 累計循環數量，確保下段相位不重複
             seg_bar_dur = 240.0 / max(seg_bpm, 1.0)
-            seg_zoom_period = 16 * seg_bar_dur * self.fps
+            seg_zoom_period = 10 * seg_bar_dur * self.fps
             cumulative_cycles += max(1, int(seg_frames / seg_zoom_period)) + 1
 
         # --- 影片串接 ---

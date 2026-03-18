@@ -289,10 +289,12 @@ class TestBuildZoompanExpr:
         assert isinstance(x, str)
         assert isinstance(y, str)
 
-    def test_z_expr_starts_with_1(self):
-        """縮放表達式應以 1.0+ 開頭（最小縮放為 1.0）"""
+    def test_z_expr_uses_base_zoom(self):
+        """縮放表達式應以 base_zoom (1.15) 開頭（雙向縮放基準點）"""
         z, _, _ = self.renderer.build_zoompan_expr(bpm=120.0, total_frames=900)
-        assert z.startswith("1.0+")
+        assert z.startswith("1.1500+")
+        # 雙向縮放：表達式包含 -0.5 偏移
+        assert "-0.5)" in z
 
     def test_x_expr_uses_ema(self):
         """x 表達式應使用 EMA 平滑（px+α×...）"""
