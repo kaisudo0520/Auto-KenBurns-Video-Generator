@@ -282,38 +282,42 @@ class TestBuildZoompanExpr:
     def setup_method(self):
         self.renderer = FFmpegRenderer(output_width=1920, output_height=1080, fps=30)
 
-    def test_returns_three_expressions(self):
-        """build_zoompan_expr 應回傳 3 個表達式"""
-        z, x, y = self.renderer.build_zoompan_expr(bpm=120.0, total_frames=900)
+    def test_returns_four_values(self):
+        """build_zoompan_expr 應回傳 4 個值（z, x, y, rotation_info）"""
+        result = self.renderer.build_zoompan_expr(bpm=120.0, total_frames=900)
+        assert len(result) == 4
+        z, x, y, rot_info = result
         assert isinstance(z, str)
         assert isinstance(x, str)
         assert isinstance(y, str)
+        assert isinstance(rot_info, dict)
 
     def test_z_expr_uses_base_zoom(self):
         """縮放表達式應以 base_zoom (1.15) 開頭（雙向縮放基準點）"""
-        z, _, _ = self.renderer.build_zoompan_expr(bpm=120.0, total_frames=900)
+        z, _, _, _ = self.renderer.build_zoompan_expr(bpm=120.0, total_frames=900)
         assert z.startswith("1.1500+")
         # 雙向縮放：表達式包含 -0.5 偏移
         assert "-0.5)" in z
 
     def test_x_expr_uses_ema(self):
         """x 表達式應使用 EMA 平滑（px+α×...）"""
-        _, x, _ = self.renderer.build_zoompan_expr(bpm=120.0, total_frames=900)
+        _, x, _, _ = self.renderer.build_zoompan_expr(bpm=120.0, total_frames=900)
         assert x.startswith("px+")
 
     def test_y_expr_uses_ema(self):
         """y 表達式應使用 EMA 平滑（py+α×...）"""
-        _, _, y = self.renderer.build_zoompan_expr(bpm=120.0, total_frames=900)
+        _, _, y, _ = self.renderer.build_zoompan_expr(bpm=120.0, total_frames=900)
         assert y.startswith("py+")
 
     def test_invalid_bpm_defaults_to_120(self):
         """bpm <= 0 應 fallback 至 120"""
-        z1, x1, y1 = self.renderer.build_zoompan_expr(bpm=0.0, total_frames=900)
-        z2, x2, y2 = self.renderer.build_zoompan_expr(bpm=120.0, total_frames=900)
+        z1, x1, y1, rot1 = self.renderer.build_zoompan_expr(bpm=0.0, total_frames=900)
+        z2, x2, y2, rot2 = self.renderer.build_zoompan_expr(bpm=120.0, total_frames=900)
         # 結構相同（振幅隨機，故不比較數值，只驗證表達式可正常生成）
         assert isinstance(z1, str)
         assert isinstance(x1, str)
         assert isinstance(y1, str)
+        assert isinstance(rot1, dict)
 
 
 class TestXfadeChainAndShortSegment:
@@ -437,3 +441,238 @@ class TestXfadeChainAndShortSegment:
             [10.0, 20.0], 0.0
         )
         assert result == 30.0
+
+
+class TestRotationExpr:
+    """測試旋轉表達式生成"""
+
+    def setup_method(self):
+        self.renderer = FFmpegRenderer(output_width=1920, output_height=1080, fps=30)
+
+    def test_build_zoompan_expr_returns_four_values(self):
+        """build_zoompan_expr 應回傳 4 個值（z, x, y, rotation_info）"""
+        result = self.renderer.build_zoompan_expr(bpm=120.0, total_frames=900)
+        assert len(result) == 4
+
+    def test_rotation_info_has_required_keys(self):
+        """rotation_info 應包含 angle_expr, max_angle_deg, rotation_amp_deg"""
+        _, _, _, rot_info = self.renderer.build_zoompan_expr(bpm=120.0, total_frames=900)
+        assert "angle_expr" in rot_info
+        assert "max_angle_deg" in rot_info
+        assert "rotation_amp_deg" in rot_info
+
+    def test_rotation_angle_in_range(self):
+        """rotation_amp_deg 應在 8~15° × clamped_ratio 範圍內"""
+        # BPM=120 → ratio=120/160=0.75
+        _, _, _, rot_info = self.renderer.build_zoompan_expr(bpm=120.0, total_frames=900)
+        amp = rot_info["rotation_amp_deg"]
+        ratio = max(0.5, min(120.0 / 160.0, 1.5))
+        assert 8.0 * ratio <= amp <= 15.0 * ratio
+
+    def test_rotation_angle_in_range_high_bpm(self):
+        """BPM=200（clamped 至 1.5）時旋轉振幅仍在安全範圍"""
+        _, _, _, rot_info = self.renderer.build_zoompan_expr(bpm=200.0, total_frames=900)
+        amp = rot_info["rotation_amp_deg"]
+        ratio = 1.5  # clamped
+        assert 8.0 * ratio <= amp <= 15.0 * ratio
+
+    def test_rotation_expr_uses_sin(self):
+        """angle_expr 應包含 sin 函數（正弦擺動）"""
+        _, _, _, rot_info = self.renderer.build_zoompan_expr(bpm=120.0, total_frames=900)
+        assert "sin(" in rot_info["angle_expr"]
+
+    def test_rotation_expr_uses_radians(self):
+        """angle_expr 中的振幅應為弧度值（< 0.5 rad ≈ 28.6°）"""
+        import re
+        _, _, _, rot_info = self.renderer.build_zoompan_expr(bpm=120.0, total_frames=900)
+        # 表達式格式: "amp_rad*sin(...)"
+        match = re.match(r"([\d.]+)\*sin", rot_info["angle_expr"])
+        assert match is not None
+        amp_rad = float(match.group(1))
+        # 最大 15° × 1.5 = 22.5° ≈ 0.393 rad
+        assert 0.0 < amp_rad < 0.5
+
+    def test_build_rotation_expr_period(self):
+        """旋轉週期應為 10/φ 小節（與 zoom 10 小節不可公約）"""
+        import math
+        phi = 1.618033988749895
+        bpm = 120.0
+        bar_duration = 240.0 / bpm
+        expected_period_frames = (10.0 / phi) * bar_duration * 30  # fps=30
+
+        # 驗證表達式中的頻率
+        expr = self.renderer.build_rotation_expr(bpm, 10.0, cycle_offset=0)
+        # 表達式格式: "amp*sin(freq*n+phase)"
+        import re
+        match = re.search(r"sin\(([\d.]+)\*n", expr)
+        assert match is not None
+        freq = float(match.group(1))
+        actual_period = 2 * math.pi / freq
+        assert abs(actual_period - expected_period_frames) < 1.0  # 容差 1 幀
+
+
+class TestRotationBufferSize:
+    """測試旋轉緩衝區尺寸計算"""
+
+    def test_buffer_size_larger_than_crop(self):
+        """緩衝區尺寸應大於裁切尺寸"""
+        buf_w, buf_h, _, _ = FFmpegRenderer._compute_rotation_buffer_size(15.0)
+        assert buf_w > 1920
+        assert buf_h > 1080
+
+    def test_buffer_size_16_9_ratio(self):
+        """緩衝區應保持 16:9 比例"""
+        buf_w, buf_h, _, _ = FFmpegRenderer._compute_rotation_buffer_size(15.0)
+        assert buf_w / buf_h == 16 / 9
+
+    def test_buffer_covers_rotation(self):
+        """旋轉後的四個角落應完全在緩衝區內（無黑角）"""
+        import math
+        max_angle = 15.0
+        buf_w, buf_h, crop_x, crop_y = FFmpegRenderer._compute_rotation_buffer_size(max_angle)
+        theta = math.radians(max_angle)
+        cos_t = math.cos(theta)
+        sin_t = math.sin(theta)
+        # 裁切區域半尺寸
+        hw, hh = 1920 / 2, 1080 / 2
+        # 四個角落旋轉後的座標檢查（相對中心）
+        corners = [(hw, hh), (hw, -hh), (-hw, hh), (-hw, -hh)]
+        for cx, cy in corners:
+            # 旋轉後座標
+            rx = abs(cx * cos_t + cy * sin_t)
+            ry = abs(-cx * sin_t + cy * cos_t)
+            assert rx <= buf_w / 2, f"角落 ({cx},{cy}) 旋轉後 x={rx} > buffer/2={buf_w/2}"
+            assert ry <= buf_h / 2, f"角落 ({cx},{cy}) 旋轉後 y={ry} > buffer/2={buf_h/2}"
+
+    def test_buffer_zero_angle(self):
+        """0° 旋轉 → 緩衝區應僅略大於裁切尺寸（2% 安全邊距）"""
+        buf_w, buf_h, _, _ = FFmpegRenderer._compute_rotation_buffer_size(0.0)
+        # 0° 旋轉：need_w = 1920 * 1.02 = 1958.4 → k = ceil(1958.4/16) = 123
+        # buf_w = 123*16 = 1968
+        assert buf_w >= 1920
+        assert buf_h >= 1080
+        # 不應太大
+        assert buf_w < 2100
+        assert buf_h < 1200
+
+    def test_crop_position_centers(self):
+        """裁切位置應使裁切區域居中"""
+        buf_w, buf_h, crop_x, crop_y = FFmpegRenderer._compute_rotation_buffer_size(10.0)
+        # 裁切後的中心 = crop_x + 960 應等於 buf_w/2
+        assert crop_x + 960 == buf_w // 2
+        assert crop_y + 540 == buf_h // 2
+
+
+class TestRotationInFilterChain:
+    """測試旋轉濾鏡在完整濾鏡鏈中的整合"""
+
+    def setup_method(self):
+        self.renderer = FFmpegRenderer(output_width=1920, output_height=1080, fps=30)
+        self.img1 = "/tmp/img1.jpg"
+        self.img2 = "/tmp/img2.jpg"
+        self.audio1 = "/tmp/audio1.mp3"
+        self.audio2 = "/tmp/audio2.mp3"
+
+    def test_single_segment_has_rotate_filter(self):
+        """單段模式 filter_complex 應包含 rotate=a="""
+        cmd = self.renderer.build_command(
+            image_paths=[self.img1],
+            audio_paths=[self.audio1],
+            output_path="/tmp/out.mp4",
+            bpm=120.0,
+            total_duration=30.0,
+            encoder="libx264",
+            audio_durations=[30.0],
+        )
+        fc_idx = cmd.index("-filter_complex")
+        filter_complex = cmd[fc_idx + 1]
+        assert "rotate=a=" in filter_complex
+
+    def test_single_segment_has_crop_after_rotate(self):
+        """單段模式應在 rotate 後有 crop=1920:1080: 裁切"""
+        cmd = self.renderer.build_command(
+            image_paths=[self.img1],
+            audio_paths=[self.audio1],
+            output_path="/tmp/out.mp4",
+            bpm=120.0,
+            total_duration=30.0,
+            encoder="libx264",
+            audio_durations=[30.0],
+        )
+        fc_idx = cmd.index("-filter_complex")
+        filter_complex = cmd[fc_idx + 1]
+        # rotate 後應有 crop
+        rotate_pos = filter_complex.index("rotate=a=")
+        crop_pos = filter_complex.index("crop=1920:1080:")
+        assert crop_pos > rotate_pos
+
+    def test_single_segment_has_scale_before_rotate(self):
+        """單段模式應在 rotate 前有 scale（放大到旋轉緩衝區）"""
+        cmd = self.renderer.build_command(
+            image_paths=[self.img1],
+            audio_paths=[self.audio1],
+            output_path="/tmp/out.mp4",
+            bpm=120.0,
+            total_duration=30.0,
+            encoder="libx264",
+            audio_durations=[30.0],
+        )
+        fc_idx = cmd.index("-filter_complex")
+        filter_complex = cmd[fc_idx + 1]
+        # 應有兩次 scale：第一次 7680:4320（超取樣），第二次放大到旋轉緩衝區
+        rotate_pos = filter_complex.index("rotate=a=")
+        # 找到 rotate 之前最近的 scale（旋轉緩衝區放大）
+        before_rotate = filter_complex[:rotate_pos]
+        # 應至少有 2 個 scale
+        assert before_rotate.count("scale=") >= 2
+
+    def test_multi_segment_has_rotate_filter(self):
+        """多段模式每段都應有 rotate=a="""
+        cmd = self.renderer.build_command(
+            image_paths=[self.img1, self.img2],
+            audio_paths=[self.audio1, self.audio2],
+            output_path="/tmp/out.mp4",
+            bpm=120.0,
+            total_duration=60.0,
+            encoder="libx264",
+            audio_durations=[30.0, 30.0],
+        )
+        fc_idx = cmd.index("-filter_complex")
+        filter_complex = cmd[fc_idx + 1]
+        # 2 段 → 應有 2 個 rotate
+        assert filter_complex.count("rotate=a=") == 2
+
+    def test_multi_segment_has_crop_after_each_rotate(self):
+        """多段模式每段 rotate 後都應有 crop"""
+        cmd = self.renderer.build_command(
+            image_paths=[self.img1, self.img2],
+            audio_paths=[self.audio1, self.audio2],
+            output_path="/tmp/out.mp4",
+            bpm=120.0,
+            total_duration=60.0,
+            encoder="libx264",
+            audio_durations=[30.0, 30.0],
+        )
+        fc_idx = cmd.index("-filter_complex")
+        filter_complex = cmd[fc_idx + 1]
+        assert filter_complex.count("crop=1920:1080:") == 2
+
+    def test_rotation_phase_differs_per_segment(self):
+        """多段模式各段旋轉相位應不同（cycle_offset 不同）"""
+        cmd = self.renderer.build_command(
+            image_paths=[self.img1, self.img2],
+            audio_paths=[self.audio1, self.audio2],
+            output_path="/tmp/out.mp4",
+            bpm=120.0,
+            total_duration=60.0,
+            encoder="libx264",
+            audio_durations=[30.0, 30.0],
+        )
+        fc_idx = cmd.index("-filter_complex")
+        filter_complex = cmd[fc_idx + 1]
+        # 提取所有 rotate 表達式
+        import re
+        rotate_exprs = re.findall(r"rotate=a='([^']+)'", filter_complex)
+        assert len(rotate_exprs) == 2
+        # 兩段的相位應不同
+        assert rotate_exprs[0] != rotate_exprs[1]

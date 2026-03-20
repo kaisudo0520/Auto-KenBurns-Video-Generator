@@ -44,6 +44,96 @@ class FFmpegRenderer:
         n_xfades = max(0, len(audio_durations) - 1)
         return sum(audio_durations) - n_xfades * crossfade_duration
 
+    @staticmethod
+    def _compute_rotation_buffer_size(
+        max_angle_deg: float, crop_w: int = 1920, crop_h: int = 1080
+    ) -> Tuple[int, int, int, int]:
+        """
+        計算旋轉所需的放大緩衝區尺寸（保持 16:9 比例）
+
+        旋轉後需要裁切回原始尺寸，因此放大後的影像必須足夠大，
+        使旋轉後的四個角落完全在影像內容中（無黑角）。
+
+        安全公式：對於裁切尺寸 (crop_w, crop_h) 和最大旋轉角 θ，
+        buffer 需滿足：
+        - buffer_w >= crop_w * cos(θ) + crop_h * sin(θ)
+        - buffer_h >= crop_w * sin(θ) + crop_h * cos(θ)
+
+        另加 2% 安全邊距。
+
+        Args:
+            max_angle_deg: 最大旋轉角度（度數，取絕對值）
+            crop_w: 裁切寬度（zoompan 輸出寬度）
+            crop_h: 裁切高度（zoompan 輸出高度）
+
+        Returns:
+            (buffer_w, buffer_h, crop_x, crop_y)
+            buffer_w/h: 放大後的緩衝區尺寸（16:9）
+            crop_x/y: 中心裁切的左上角座標
+        """
+        theta = math.radians(abs(max_angle_deg))
+        cos_t = math.cos(theta)
+        sin_t = math.sin(theta)
+
+        # 最小需求尺寸（含 2% 安全邊距）
+        safety = 1.02
+        need_w = (crop_w * cos_t + crop_h * sin_t) * safety
+        need_h = (crop_w * sin_t + crop_h * cos_t) * safety
+
+        # 以 16:9 的倍數 k 來計算（保持比例）
+        k = math.ceil(max(need_w / 16, need_h / 9))
+        buffer_w = 16 * k
+        buffer_h = 9 * k
+
+        # 中心裁切座標
+        crop_x = (buffer_w - crop_w) // 2
+        crop_y = (buffer_h - crop_h) // 2
+
+        return buffer_w, buffer_h, crop_x, crop_y
+
+    def build_rotation_expr(
+        self, bpm: float, rotation_amp_deg: float, cycle_offset: int = 0
+    ) -> str:
+        """
+        構建 FFmpeg rotate 濾鏡的角度表達式（弧度）
+
+        使用 BPM 同步的正弦擺動：
+        angle = amp_rad * sin(2π / period_frames * n + phase)
+
+        週期 = 10/φ 小節 ≈ 6.18 小節（與 zoom 10 小節黃金比例偏移，永不同步）
+
+        Args:
+            bpm: 音樂 BPM
+            rotation_amp_deg: 旋轉振幅（度數）
+            cycle_offset: 相位偏移量（多段渲染時確保方向連續性）
+
+        Returns:
+            FFmpeg rotate 濾鏡的角度表達式字串（弧度值）
+        """
+        if bpm <= 0:
+            bpm = 120.0
+
+        phi = 1.618033988749895
+        bar_duration = 240.0 / bpm
+
+        # 旋轉週期 = 10/φ 小節 ≈ 6.18 小節（與 zoom 10 小節不可公約）
+        rot_period_bars = 10.0 / phi
+        rot_period_frames = rot_period_bars * bar_duration * self.fps
+
+        # 旋轉頻率
+        rot_freq = 2 * math.pi / rot_period_frames
+
+        # 相位偏移（與 XYZ 一致：cycle_offset × 黃金角 2.4 rad）
+        phase = cycle_offset * 2.4
+
+        # 振幅轉弧度
+        amp_rad = math.radians(rotation_amp_deg)
+
+        # 正弦擺動表達式（sin 自然在兩端減速、中間加速，模擬物理搖擺）
+        angle_expr = f"{amp_rad:.6f}*sin({rot_freq:.8f}*n+{phase:.4f})"
+
+        return angle_expr
+
     async def detect_encoder(self) -> str:
         """偵測可用的 H.264 編碼器，優先使用 NVENC"""
         ffmpeg_path = shutil.which("ffmpeg")
@@ -71,9 +161,9 @@ class FFmpegRenderer:
     def build_zoompan_expr(
         self, bpm: float, total_frames: int, cycle_offset: int = 0,
         face_params: Optional[Dict] = None,
-    ) -> Tuple[str, str, str]:
+    ) -> Tuple[str, str, str, Dict]:
         """
-        根據 BPM 構建 XYZ 三軸統一運動的 zoompan 表達式
+        根據 BPM 構建 XYZ 三軸統一運動的 zoompan 表達式 + 旋轉資訊
 
         設計理念（統一 3D 攝影機模型 + Overscan 雙向縮放）：
         - base_zoom=1.15 讓圖片初始就只顯示 ~85%，多出 15% 為移動緩衝區
@@ -114,7 +204,9 @@ class FFmpegRenderer:
             face_params: 臉部安全參數（由 compute_face_safe_params 產出），None 表示無臉部偵測
 
         Returns:
-            (z_expr, x_expr, y_expr) 三個 FFmpeg 表達式字串
+            (z_expr, x_expr, y_expr, rotation_info) 四個值
+            - z_expr, x_expr, y_expr: FFmpeg zoompan 表達式字串
+            - rotation_info: dict 包含 angle_expr, max_angle_deg, rotation_amp_deg
         """
         if bpm <= 0:
             bpm = 120.0
@@ -266,7 +358,19 @@ class FFmpegRenderer:
         )
         y_expr = f"py+{ema_alpha}*({y_target}-py)"
 
-        return z_expr, x_expr, y_expr
+        # === 旋轉參數 ===
+        # 旋轉振幅隨機：8~15° × BPM ratio
+        rotation_amp_deg = random.uniform(8.0, 15.0) * clamped_ratio
+        # 構建旋轉表達式
+        angle_expr = self.build_rotation_expr(bpm, rotation_amp_deg, cycle_offset)
+
+        rotation_info = {
+            "angle_expr": angle_expr,
+            "max_angle_deg": rotation_amp_deg,
+            "rotation_amp_deg": rotation_amp_deg,
+        }
+
+        return z_expr, x_expr, y_expr, rotation_info
 
     def build_command(
         self,
@@ -326,7 +430,7 @@ class FFmpegRenderer:
         total_frames = int(total_duration * self.fps)
         # 取第一張圖片的 face_params（單段模式只有 1 張圖片）
         fp = face_params_list[0] if face_params_list else None
-        z_expr, x_expr, y_expr = self.build_zoompan_expr(bpm, total_frames, face_params=fp)
+        z_expr, x_expr, y_expr, rot_info = self.build_zoompan_expr(bpm, total_frames, face_params=fp)
 
         # 影片淡入淡出幀數（1 秒）
         fade_frames = self.fps
@@ -338,12 +442,20 @@ class FFmpegRenderer:
         os_w = self.output_width * oversample
         os_h = self.output_height * oversample
 
-        # 影片濾鏡
+        # 旋轉緩衝區計算（在 zoompan 輸出解析度上）
+        buf_w, buf_h, crop_x, crop_y = self._compute_rotation_buffer_size(
+            rot_info["max_angle_deg"], self.output_width, self.output_height
+        )
+
+        # 影片濾鏡（含旋轉：zoompan → scale 放大 → rotate → crop 裁切回原尺寸）
         video_filter = (
             f"[0:v]format=yuv420p,"
             f"scale={os_w}:{os_h}:flags=lanczos,"
             f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}'"
             f":d={total_frames}:s={self.output_width}x{self.output_height}:fps={self.fps},"
+            f"scale={buf_w}:{buf_h}:flags=lanczos,"
+            f"rotate=a='{rot_info['angle_expr']}':fillcolor=black,"
+            f"crop={self.output_width}:{self.output_height}:{crop_x}:{crop_y},"
             f"fade=in:0:{fade_frames},fade=out:{fade_out_start}:{fade_frames}[v]"
         )
 
@@ -475,12 +587,17 @@ class FFmpegRenderer:
                 img_idx = i % len(image_paths)
                 if img_idx < len(fp_list):
                     seg_fp = fp_list[img_idx]
-            z_expr, x_expr, y_expr = self.build_zoompan_expr(
+            z_expr, x_expr, y_expr, rot_info = self.build_zoompan_expr(
                 seg_bpm, seg_frames, cycle_offset=cumulative_cycles,
                 face_params=seg_fp,
             )
             # 同一圖片用 split 分流的輸入標籤，否則直接用輸入索引
             input_ref = f"[img{i}]" if all_same_image else f"[{i}:v]"
+
+            # 旋轉緩衝區計算（在 zoompan 輸出解析度上）
+            buf_w, buf_h, crop_x, crop_y = self._compute_rotation_buffer_size(
+                rot_info["max_angle_deg"], self.output_width, self.output_height
+            )
 
             # 單段或首末段加淡入淡出，中間段不加（由 xfade 處理過渡）
             fade_filter = ""
@@ -500,7 +617,10 @@ class FFmpegRenderer:
                 f"{input_ref}format=yuv420p,"
                 f"scale={os_w}:{os_h}:flags=lanczos,"
                 f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}'"
-                f":d={seg_frames}:s={self.output_width}x{self.output_height}:fps={self.fps}"
+                f":d={seg_frames}:s={self.output_width}x{self.output_height}:fps={self.fps},"
+                f"scale={buf_w}:{buf_h}:flags=lanczos,"
+                f"rotate=a='{rot_info['angle_expr']}':fillcolor=black,"
+                f"crop={self.output_width}:{self.output_height}:{crop_x}:{crop_y}"
                 f"{fade_filter}[v{i}]"
             )
             # 累計循環數量，確保下段相位不重複
