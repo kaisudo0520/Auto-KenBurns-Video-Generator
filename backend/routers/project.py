@@ -176,7 +176,10 @@ async def list_projects(
     total_items = query.count()
 
     # Apply sorting
-    sort_column = getattr(ProjectModel, sort_by, ProjectModel.created_at)
+    allowed_sort_fields = {"created_at", "updated_at", "name", "status"}
+    if sort_by not in allowed_sort_fields:
+        sort_by = "created_at"
+    sort_column = getattr(ProjectModel, sort_by)
     if sort_order == "desc":
         query = query.order_by(sort_column.desc())
     else:

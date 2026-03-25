@@ -217,7 +217,14 @@ export function createProgressWSUrl(baseUrl: string, jobId: string, token?: stri
  */
 export function parseWSMessage(data: string): WSServerMessage | null {
   try {
-    return JSON.parse(data) as WSServerMessage;
+    const parsed: unknown = JSON.parse(data);
+    if (typeof parsed !== 'object' || parsed === null) return null;
+    const msg = parsed as Record<string, unknown>;
+    if (typeof msg.type !== 'string' || msg.data === undefined) {
+      console.warn('Invalid WebSocket message structure:', data);
+      return null;
+    }
+    return parsed as WSServerMessage;
   } catch {
     console.error('Failed to parse WebSocket message:', data);
     return null;

@@ -19,6 +19,8 @@ const emit = defineEmits<{
   (e: 'reorder', direction: 'up' | 'down'): void
 }>()
 
+const waveformHeights = Array.from({ length: 24 }, () => Math.random() * 70 + 30)
+
 const formattedSize = computed(() => {
   if (!props.size) return ''
   const kb = props.size / 1024
@@ -93,7 +95,7 @@ const dimensions = computed(() => {
           :key="i"
           class="flex-1 rounded-full transition-all duration-300"
           :class="i % 3 === 0 ? 'bg-accent-violet/60' : 'bg-accent-cyan/30'"
-          :style="{ height: `${Math.random() * 70 + 30}%` }"
+          :style="{ height: `${waveformHeights[i - 1]}%` }"
         ></div>
       </div>
     </div>

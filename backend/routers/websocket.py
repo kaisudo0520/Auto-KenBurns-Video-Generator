@@ -89,6 +89,12 @@ class ConnectionManager:
         }
         await self.send_message(job_id, message)
 
+    def cleanup_job(self, job_id: str):
+        """清理已完成 job 的連線追蹤"""
+        if job_id in self.active_connections:
+            del self.active_connections[job_id]
+            logger.debug(f"已清理 job {job_id} 的 WebSocket 連線追蹤")
+
 
 # Global connection manager
 manager = ConnectionManager()
@@ -191,6 +197,8 @@ async def broadcast_job_complete(job_id: str, output_path: str = None, **kwargs)
         "output_path": output_path,
         **kwargs,
     })
+    # 完成訊息發送後，清理該 job 的連線追蹤
+    manager.cleanup_job(job_id)
 
 
 async def broadcast_job_error(job_id: str, error: str, code: str = None):
@@ -200,3 +208,5 @@ async def broadcast_job_error(job_id: str, error: str, code: str = None):
         "error": error,
         "code": code,
     })
+    # 錯誤訊息發送後，清理該 job 的連線追蹤
+    manager.cleanup_job(job_id)

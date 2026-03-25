@@ -17,6 +17,7 @@ export const useRenderStore = defineStore('render', () => {
   const usePolling = ref(false)
   const pollingInterval = ref<ReturnType<typeof setInterval> | null>(null)
   const pollingJobId = ref<string | null>(null)
+  const wsTimeoutId = ref<ReturnType<typeof setTimeout> | null>(null)
 
   // 啟動輪詢（當 WebSocket 失敗時使用）
   function startPolling(jobId: string) {
@@ -241,7 +242,8 @@ export const useRenderStore = defineStore('render', () => {
     wsService.connect(jobId)
 
     // 5 秒後如果仍未連接，則切換到輪詢
-    setTimeout(() => {
+    wsTimeoutId.value = window.setTimeout(() => {
+      wsTimeoutId.value = null
       if (wsService.getState() !== 'connected' && currentJob.value && (currentJob.value.status === 'rendering' || currentJob.value.status === 'encoding' || currentJob.value.status === 'preparing' || currentJob.value.status === 'queued')) {
         console.log('WebSocket timeout, falling back to polling...')
         startPolling(jobId)
@@ -250,6 +252,10 @@ export const useRenderStore = defineStore('render', () => {
   }
 
   function disconnectProgressWS() {
+    if (wsTimeoutId.value) {
+      clearTimeout(wsTimeoutId.value)
+      wsTimeoutId.value = null
+    }
     wsService.disconnect()
     wsService.offProgress()
     wsService.offStatus()

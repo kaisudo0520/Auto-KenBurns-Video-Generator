@@ -4,8 +4,8 @@
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-green?logo=fastapi)
 ![Vue 3](https://img.shields.io/badge/Vue-3+-42b883?logo=vue.js)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5+-3178c6?logo=typescript)
-![Tests](https://img.shields.io/badge/Tests-108%20passed-green)
-![Coverage](https://img.shields.io/badge/Coverage-70%25-yellow)
+![Tests](https://img.shields.io/badge/Tests-159%20passed-green)
+![Coverage](https://img.shields.io/badge/Coverage-80%25-yellow)
 
 ## 專案概述
 
@@ -214,9 +214,9 @@ npm run test
 
 | 類別 | 數量 |
 |------|------|
-| 後端測試 | 90 |
+| 後端測試 | 141 |
 | 前端測試 | 18 |
-| **總計** | **108** |
+| **總計** | **159** |
 
 ## 專案結構
 
@@ -305,6 +305,14 @@ npm run test
 ```
 Use the coder-pm agent to build [功能描述]
 ```
+
+## TODO — 架構級待辦
+
+以下項目需要獨立開發週期處理，不適合在 code review 中快速修復：
+
+- [ ] **認證/授權系統** — 實作 JWT 或 API Key 認證，所有 API 端點目前無任何認證保護。需設計：Token 機制、角色權限、中介層整合、環境區分（dev/prod）
+- [ ] **DB 連線池改造** — 目前使用 SQLite StaticPool 單一連線，渲染期間長期持有 session。需評估：NullPool + scoped_session、或遷移至 PostgreSQL + 連線池
+- [ ] **前端 `as any` 型別標註清理** — `ResultView.vue` 和 `renderStore.ts` 中有多處 `as any` 強制轉型，需釐清後端 API 回應結構後統一修正 TypeScript 型別定義
 
 ## 授權
 

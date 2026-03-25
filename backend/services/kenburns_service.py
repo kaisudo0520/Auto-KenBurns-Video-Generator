@@ -640,8 +640,8 @@ class KenBurnsService:
         """取得音訊時長"""
         try:
             import librosa
-            info = librosa.info(audio_path)
-            return float(info.get("duration", 30.0))
+            duration = librosa.get_duration(path=audio_path)
+            return float(duration)
         except Exception as e:
             logger.warning(f"Audio duration error for {audio_path}: {e}")
             return 30.0  # 默認30秒

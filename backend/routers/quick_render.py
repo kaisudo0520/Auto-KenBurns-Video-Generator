@@ -7,6 +7,7 @@
 import asyncio
 import logging
 import os
+import shutil
 import uuid
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
@@ -17,6 +18,9 @@ from PIL import Image
 
 from backend import deps
 from backend.database.connection import SessionLocal
+
+# 持有背景任務參照，防止 GC 回收導致異常靜默丟失
+_background_tasks: set = set()
 from backend.models.project import Project as ProjectModel
 from backend.models.project import ProjectStatus
 from backend.models.render_job import RenderJob as RenderJobModel
@@ -68,6 +72,17 @@ async def quick_render(
     except json.JSONDecodeError:
         durations = []
 
+    # 檔案大小限制
+    MAX_IMAGE_SIZE = 50 * 1024 * 1024   # 50 MB
+    MAX_AUDIO_SIZE = 100 * 1024 * 1024  # 100 MB
+    MAX_AUDIO_FILES = 20
+
+    if len(audios) > MAX_AUDIO_FILES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "TOO_MANY_AUDIOS", "message": f"音訊數量不能超過 {MAX_AUDIO_FILES}"},
+        )
+
     # 驗證檔案類型
     allowed_image_types = {"image/jpeg", "image/jpg", "image/png", "image/webp"}
     allowed_audio_types = {"audio/mpeg", "audio/mp3", "audio/wav", "audio/ogg", "audio/x-m4a", "audio/mp4"}
@@ -90,15 +105,19 @@ async def quick_render(
                 detail={"code": "INVALID_IMAGE_TYPE", "message": f"不支援的圖片格式: {content_type}"},
             )
 
-        # 生成檔案名
-        ext = content_type.split("/")[-1]
-        if ext == "jpeg":
-            ext = "jpg"
+        # 生成檔案名（白名單映射副檔名）
+        ext_map = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/bmp": "bmp", "image/gif": "gif"}
+        ext = ext_map.get(content_type, "jpg")
         filename = f"image_{i}_{uuid.uuid4().hex[:8]}.{ext}"
         filepath = os.path.join(project_upload_dir, filename)
 
-        # 儲存檔案
+        # 儲存檔案（含大小檢查）
         content = await img.read()
+        if len(content) > MAX_IMAGE_SIZE:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail={"code": "FILE_TOO_LARGE", "message": f"圖片大小超過 {MAX_IMAGE_SIZE // (1024*1024)} MB 限制"},
+            )
         with open(filepath, "wb") as f:
             f.write(content)
 
@@ -142,14 +161,18 @@ async def quick_render(
                 detail={"code": "INVALID_AUDIO_TYPE", "message": f"不支援的音樂格式: {content_type}"},
             )
 
-        # 儲存音樂
-        ext = content_type.split("/")[-1]
-        if ext == "x-m4a":
-            ext = "m4a"
+        # 儲存音樂（白名單映射副檔名）
+        audio_ext_map = {"audio/mpeg": "mp3", "audio/mp3": "mp3", "audio/wav": "wav", "audio/x-wav": "wav", "audio/aac": "aac", "audio/flac": "flac", "audio/ogg": "ogg", "audio/x-m4a": "m4a", "audio/mp4": "m4a", "video/mp4": "mp4"}
+        ext = audio_ext_map.get(content_type, "mp3")
         audio_filename = f"audio_{uuid.uuid4().hex[:8]}.{ext}"
         audio_filepath = os.path.join(project_upload_dir, audio_filename)
 
         audio_content = await audio.read()
+        if len(audio_content) > MAX_AUDIO_SIZE:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail={"code": "FILE_TOO_LARGE", "message": f"音訊大小超過 {MAX_AUDIO_SIZE // (1024*1024)} MB 限制"},
+            )
         with open(audio_filepath, "wb") as f:
             f.write(audio_content)
 
@@ -247,10 +270,30 @@ async def quick_render(
             await bg_service.start_render(job_id, bg_project)
         except Exception as e:
             logger.error(f"背景渲染異常: {e}", exc_info=True)
+            try:
+                bg_db.rollback()
+                # 更新 job 狀態為 FAILED，避免永久卡在 queued
+                bg_job = bg_db.query(RenderJobModel).filter(RenderJobModel.id == job_id).first()
+                if bg_job and bg_job.status not in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
+                    bg_job.status = JobStatus.FAILED
+                    bg_job.error_code = "RENDER_FAILED"
+                    bg_job.error_message = "渲染過程中發生錯誤"
+                    bg_db.commit()
+            except Exception:
+                pass
         finally:
             bg_db.close()
+            # 清理臨時上傳目錄
+            try:
+                if os.path.exists(project_upload_dir):
+                    shutil.rmtree(project_upload_dir)
+                    logger.info(f"已清理臨時目錄: {project_upload_dir}")
+            except Exception as cleanup_err:
+                logger.warning(f"臨時目錄清理失敗: {cleanup_err}")
 
-    asyncio.create_task(_run_render_in_background())
+    task = asyncio.create_task(_run_render_in_background())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
     # 計算預估時間
     estimated_duration = int(total_duration * 1.5)

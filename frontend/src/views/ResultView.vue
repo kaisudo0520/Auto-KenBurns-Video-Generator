@@ -132,7 +132,9 @@ async function fetchJobStatus() {
       startPolling()
       startTimer()
       // 初始化 renderStore 的 jobStatus 以便 WebSocket 進度更新能寫入
-      try { await renderStore.fetchJobStatus(jobId.value) } catch {}
+      try { await renderStore.fetchJobStatus(jobId.value) } catch (err) {
+        console.warn('Failed to initialize job status for WebSocket:', err)
+      }
       // 若尚未建立 WebSocket 連線（例如重新整理頁面），則建立連線
       if (!renderStore.currentJob) {
         renderStore.connectProgressWS(jobId.value)

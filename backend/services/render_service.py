@@ -114,11 +114,12 @@ class RenderService:
             logger.error(f"Render failed for job {job_id}: {e}", exc_info=True)
             job.status = JobStatus.FAILED
             job.error_code = "RENDER_FAILED"
-            job.error_message = str(e)
+            job.error_message = "渲染過程中發生錯誤"
             job.completed_at = datetime.utcnow()
+            project.status = ProjectStatus.DRAFT
             self.db.commit()
 
-            await broadcast_job_error(job_id, str(e), "RENDER_FAILED")
+            await broadcast_job_error(job_id, "渲染失敗，請重試", "RENDER_FAILED")
             return
         finally:
             _active_renderers.pop(job_id, None)
@@ -137,7 +138,6 @@ class RenderService:
         job.output_path = output_path
         if os.path.exists(output_path):
             job.output_size = os.path.getsize(output_path)
-        self.db.commit()
 
         project.status = ProjectStatus.COMPLETED
         self.db.commit()
@@ -198,7 +198,8 @@ class RenderService:
 
         face_regions_list: list[list[dict]] = []
         for idx, img_path in enumerate(image_paths):
-            regions = detect_anime_faces(img_path)
+            # 使用 asyncio.to_thread 避免同步 CPU 密集型操作阻塞事件迴圈
+            regions = await asyncio.to_thread(detect_anime_faces, img_path)
             face_regions_list.append(regions)
             pct = int((idx + 1) / len(image_paths) * 100)
             await broadcast_job_progress(
@@ -237,7 +238,8 @@ class RenderService:
             kenburns = KenBurnsService()
             try:
                 for ap in audio_paths:
-                    analysis = kenburns.analyze_music(ap)
+                    # 使用 asyncio.to_thread 避免同步 CPU 密集型操作阻塞事件迴圈
+                    analysis = await asyncio.to_thread(kenburns.analyze_music, ap)
                     bpms.append(analysis.bpm)
                     audio_durations.append(analysis.duration)
                 bpm = bpms[0]  # 單段模式使用第一首的 BPM
@@ -365,7 +367,14 @@ class RenderService:
             job.current_frame = int(current_time * fps_value)
             eta = int((effective_total - current_time) * 1.2) if current_time > 0 else 0
             job.eta_seconds = max(0, eta)
-            self.db.commit()
+            try:
+                self.db.commit()
+            except Exception as commit_err:
+                logger.warning(f"進度更新 commit 失敗: {commit_err}")
+                try:
+                    self.db.rollback()
+                except Exception:
+                    pass
             await broadcast_job_progress(
                 job_id=job.id,
                 progress=mapped,

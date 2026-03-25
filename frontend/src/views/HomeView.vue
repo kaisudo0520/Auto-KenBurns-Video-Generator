@@ -46,21 +46,14 @@ function formatFileSize(bytes: number): string {
 function handleImagesSelected(files: File[]) {
   files.forEach(file => {
     const id = genId()
-    // 先加入佔位（確保順序），再非同步載入預覽
-    imageItems.value.push({ id, file, preview: '' })
-
-    const reader = new FileReader()
-    reader.onload = (e) => {
-      const item = imageItems.value.find(i => i.id === id)
-      if (item) {
-        item.preview = e.target?.result as string
-      }
-    }
-    reader.readAsDataURL(file)
+    const preview = URL.createObjectURL(file)
+    imageItems.value.push({ id, file, preview })
   })
 }
 
 function handleImageRemove(index: number) {
+  const item = imageItems.value[index]
+  if (item?.preview) URL.revokeObjectURL(item.preview)
   imageItems.value.splice(index, 1)
 }
 
@@ -140,11 +133,15 @@ async function startRender() {
     console.error('Render error:', error)
     const errMsg = error?.response?.data?.detail || error?.message || '渲染失敗，請稍後再試'
     renderError.value = Array.isArray(errMsg) ? errMsg[0]?.msg || JSON.stringify(errMsg) : errMsg
+  } finally {
     isRendering.value = false
   }
 }
 
 function clearAll() {
+  imageItems.value.forEach(item => {
+    if (item.preview) URL.revokeObjectURL(item.preview)
+  })
   imageItems.value = []
   audioItems.value = []
   renderError.value = null

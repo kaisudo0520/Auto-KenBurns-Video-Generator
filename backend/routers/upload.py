@@ -131,8 +131,7 @@ async def upload_image(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={
                 "code": "UPLOAD_FAILED",
-                "message": "上傳失敗",
-                "details": {"error": str(e)},
+                "message": "上傳失敗，請重試",
             },
         )
 
@@ -278,8 +277,7 @@ async def upload_audio(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={
                 "code": "UPLOAD_FAILED",
-                "message": "上傳失敗",
-                "details": {"error": str(e)},
+                "message": "上傳失敗，請重試",
             },
         )
 

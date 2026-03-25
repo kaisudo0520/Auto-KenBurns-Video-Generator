@@ -23,6 +23,7 @@ class WebSocketService {
   private maxReconnectAttempts = 5
   private reconnectInterval = 3000
   private shouldReconnect = true
+  private reconnectTimer: number | null = null
 
   private onProgressCallback?: ProgressCallback
   private onStatusCallback?: StatusCallback
@@ -99,7 +100,8 @@ class WebSocketService {
         if (this.shouldReconnect && this.reconnectAttempts < this.maxReconnectAttempts) {
           this.reconnectAttempts++
           console.log(`Reconnecting... Attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts}`)
-          setTimeout(() => {
+          this.reconnectTimer = window.setTimeout(() => {
+            this.reconnectTimer = null
             if (this.currentJobId && this.shouldReconnect) {
               this.connect(this.currentJobId)
             }
@@ -116,6 +118,10 @@ class WebSocketService {
 
   disconnect(): void {
     this.shouldReconnect = false
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
     if (this.ws) {
       this.setState('disconnecting')
       if (this.currentJobId) {

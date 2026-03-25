@@ -403,10 +403,18 @@ async def open_output_folder(
     abs_path = os.path.abspath(job.output_path)
     folder = os.path.dirname(abs_path)
 
+    # 路徑遍歷防護：確保在允許的 output 目錄內
+    output_dir = os.path.abspath(os.getenv("OUTPUT_DIR", "./output"))
+    if not abs_path.startswith(output_dir + os.sep) and os.path.dirname(abs_path) != output_dir:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "PATH_FORBIDDEN", "message": "路徑不在允許的輸出目錄內"},
+        )
+
     if not os.path.isdir(folder):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail={"code": "FOLDER_NOT_FOUND", "message": f"資料夾不存在: {folder}"},
+            detail={"code": "FOLDER_NOT_FOUND", "message": "輸出資料夾不存在"},
         )
 
     # 開啟檔案總管（跨平台）
@@ -414,7 +422,7 @@ async def open_output_folder(
         if sys.platform == "win32":
             if os.path.exists(abs_path):
                 # 選取檔案
-                subprocess.Popen(f'explorer /select,"{abs_path}"', shell=True)
+                subprocess.Popen(["explorer", "/select,", abs_path])
             else:
                 subprocess.Popen(["explorer", str(folder)])
         elif sys.platform == "darwin":
@@ -425,7 +433,7 @@ async def open_output_folder(
         logger.error(f"Failed to open folder: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"code": "OPEN_FAILED", "message": f"無法開啟資料夾: {e}"},
+            detail={"code": "OPEN_FAILED", "message": "無法開啟資料夾"},
         )
 
-    return {"success": True, "folder": folder, "file": abs_path}
+    return {"success": True, "message": "已開啟輸出資料夾"}

@@ -852,8 +852,13 @@ class FFmpegRenderer:
         except Exception as e:
             logger.error(f"FFmpeg 進度追蹤異常: {e}")
 
-        # 等待進程結束
-        await self._process.wait()
+        # 等待進程結束（含超時保護）
+        try:
+            await asyncio.wait_for(self._process.wait(), timeout=120.0)
+        except asyncio.TimeoutError:
+            logger.error("FFmpeg 進程等待超時，強制終止")
+            self._process.kill()
+            await self._process.wait()
         returncode = self._process.returncode
 
         if returncode != 0:

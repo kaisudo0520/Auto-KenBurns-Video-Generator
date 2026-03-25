@@ -32,35 +32,5 @@ export interface PaginatedResponse<T> extends ApiResponse<T[]> {
   pagination: Pagination;
 }
 
-/**
- * Pagination metadata
- */
-export interface Pagination {
-  page: number;
-  page_size: number;
-  total_items: number;
-  total_pages: number;
-}
-
-/**
- * Error response structure
- */
-export interface ErrorResponse {
-  success: false;
-  error: ErrorDetail;
-}
-
-/**
- * Error details
- */
-export interface ErrorDetail {
-  code: string;
-  message: string;
-  details?: Record<string, unknown>;
-  request_id?: string;
-}
-
-/**
- * Timestamp helper type
- */
-export type Timestamp = string; // ISO 8601 format: "2026-03-01T10:30:00Z"
+// Pagination, ErrorResponse, ErrorDetail, Timestamp 已透過 export * from './common' 匯出
+// 避免重複定義

@@ -67,7 +67,7 @@ app = FastAPI(
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
+    allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:5174").split(","),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -87,7 +87,7 @@ async def general_exception_handler(request: Request, exc: Exception) -> JSONRes
             "success": False,
             "error": {
                 "code": "INTERNAL_ERROR",
-                "message": str(exc),
+                "message": "伺服器內部錯誤，請稍後再試",
                 "request_id": id(request),
             }
         }

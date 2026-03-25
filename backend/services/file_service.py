@@ -51,9 +51,12 @@ class FileService:
         Returns:
             FileModel: Created file record
         """
-        # Generate unique filename
+        # Generate unique filename with extension whitelist
         file_id = str(uuid.uuid4())
         extension = os.path.splitext(filename)[1].lower()
+        allowed_image_extensions = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
+        if extension not in allowed_image_extensions:
+            raise ValueError(f"不允許的圖片副檔名: {extension}")
         stored_filename = f"{file_id}{extension}"
         file_path = os.path.join(self.images_dir, stored_filename)
 
@@ -113,9 +116,12 @@ class FileService:
         Returns:
             FileModel: Created file record
         """
-        # Generate unique filename
+        # Generate unique filename with extension whitelist
         file_id = str(uuid.uuid4())
         extension = os.path.splitext(filename)[1].lower()
+        allowed_audio_extensions = {".mp3", ".wav", ".aac", ".flac", ".ogg", ".m4a", ".mp4", ".wma"}
+        if extension not in allowed_audio_extensions:
+            raise ValueError(f"不允許的音訊副檔名: {extension}")
         stored_filename = f"{file_id}{extension}"
         file_path = os.path.join(self.audios_dir, stored_filename)
 

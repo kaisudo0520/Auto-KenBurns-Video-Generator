@@ -22,6 +22,8 @@ const emit = defineEmits<{
   (e: 'remove', id: string): void
 }>()
 
+const waveformHeights = Array.from({ length: 40 }, () => Math.random() * 60 + 20)
+
 const displayDuration = computed(() => {
   if (props.duration) {
     const minutes = Math.floor(props.duration / 60)
@@ -55,7 +57,7 @@ const displayLoudness = computed(() => {
           :key="i"
           class="w-1 bg-accent-violet rounded-full animate-pulse"
           :style="{
-            height: `${Math.random() * 60 + 20}%`,
+            height: `${waveformHeights[i - 1]}%`,
             animationDelay: `${i * 50}ms`
           }"
         />
