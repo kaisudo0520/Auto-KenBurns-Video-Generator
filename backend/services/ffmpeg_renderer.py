@@ -11,6 +11,8 @@ import math
 import os
 import random
 import shutil
+import subprocess
+import threading
 from typing import Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -797,14 +799,32 @@ class FFmpegRenderer:
         logger.info(f"執行 FFmpeg: {' '.join(cmd[:6])}...")
         logger.debug(f"完整命令: {' '.join(cmd)}")
 
-        self._process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        # 使用 subprocess.Popen 取代 asyncio.create_subprocess_exec，
+        # 因為 Windows 的 SelectorEventLoop 不支援 asyncio 子程序
+        self._process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
 
+        loop = asyncio.get_event_loop()
         last_progress = 0
         cancel_check_counter = 0
+
+        # 背景執行緒持續排空 stderr，防止管道緩衝區填滿導致 deadlock
+        stderr_chunks: list[bytes] = []
+
+        def _drain_stderr() -> None:
+            try:
+                assert self._process.stderr is not None
+                for line in self._process.stderr:
+                    stderr_chunks.append(line)
+            except (ValueError, OSError):
+                # 進程已關閉
+                pass
+
+        stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        stderr_thread.start()
 
         try:
             while True:
@@ -812,7 +832,7 @@ class FFmpegRenderer:
                     break
 
                 line = await asyncio.wait_for(
-                    self._process.stdout.readline(),
+                    loop.run_in_executor(None, self._process.stdout.readline),
                     timeout=30.0,
                 )
 
@@ -845,6 +865,7 @@ class FFmpegRenderer:
                     if cancel_check and cancel_check():
                         logger.info("偵測到取消請求，終止 FFmpeg")
                         self.terminate()
+                        stderr_thread.join(timeout=5.0)
                         return False
 
         except asyncio.TimeoutError:
@@ -854,22 +875,35 @@ class FFmpegRenderer:
 
         # 等待進程結束（含超時保護）
         try:
-            await asyncio.wait_for(self._process.wait(), timeout=120.0)
+            await asyncio.wait_for(
+                loop.run_in_executor(None, self._process.wait),
+                timeout=120.0,
+            )
         except asyncio.TimeoutError:
             logger.error("FFmpeg 進程等待超時，強制終止")
             self._process.kill()
-            await self._process.wait()
+            self._process.wait()
+
+        stderr_thread.join(timeout=5.0)
         returncode = self._process.returncode
 
         if returncode != 0:
-            stderr = await self._process.stderr.read() if self._process.stderr else b""
-            stderr_text = stderr.decode("utf-8", errors="replace")
+            stderr_text = b"".join(stderr_chunks).decode("utf-8", errors="replace")
             # 被終止的情況（取消）
             if returncode in (-9, -15, 1) and cancel_check and cancel_check():
                 logger.info("FFmpeg 已被取消終止")
                 return False
-            logger.error(f"FFmpeg 失敗 (code={returncode}): {stderr_text[-500:]}")
-            raise RuntimeError(f"FFmpeg 渲染失敗 (code={returncode}): {stderr_text[-200:]}")
+            # 從 stderr 提取實際錯誤行（過濾掉編碼器參數等雜訊）
+            error_lines = [
+                ln for ln in stderr_text.splitlines()
+                if any(kw in ln.lower() for kw in ("error", "failed", "invalid", "no such", "not found", "cannot", "unable"))
+            ]
+            error_summary = "\n".join(error_lines[-10:]) if error_lines else stderr_text[-500:]
+            logger.error(f"FFmpeg 失敗 (code={returncode}):\n{error_summary}")
+            raise RuntimeError(
+                f"FFmpeg 渲染失敗 (code={returncode}): "
+                f"{error_lines[-1] if error_lines else stderr_text[-200:]}"
+            )
 
         logger.info("FFmpeg 渲染完成")
         return True
