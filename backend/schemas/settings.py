@@ -55,12 +55,12 @@ class SettingsValue(BaseModel):
 # ========================================
 
 class GPUInfo(BaseModel):
-    """GPU information."""
+    """GPU 資訊。"""
     available: bool
     name: Optional[str] = None
     memory_total: Optional[int] = None  # MB
     memory_used: Optional[int] = None   # MB
-    cuda_version: Optional[str] = None
+    driver_version: Optional[str] = None  # NVIDIA 驅動版本（由 nvidia-smi 查詢）
     nvenc_available: Optional[bool] = None
 
 

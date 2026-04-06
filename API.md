@@ -939,7 +939,7 @@ Content-Type: multipart/form-data
       "name": "NVIDIA GeForce RTX 3080",
       "memory_total": 10240,
       "memory_used": 2048,
-      "cuda_version": "12.2",
+      "driver_version": "560.35.03",
       "nvenc_available": true
     },
     "storage": {

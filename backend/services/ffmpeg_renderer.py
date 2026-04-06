@@ -136,13 +136,20 @@ class FFmpegRenderer:
 
         return angle_expr
 
-    async def detect_encoder(self) -> str:
-        """偵測可用的 H.264 編碼器，優先使用 NVENC"""
+    async def detect_encoder(self, prefer_hevc: bool = False) -> str:
+        """偵測可用的硬體編碼器，優先使用 NVENC
+
+        Args:
+            prefer_hevc: 若為 True，優先嘗試 hevc_nvenc（H.265）；
+                         否則優先嘗試 h264_nvenc（H.264，預設）。
+        Returns:
+            可用的編碼器名稱字串，例如 "h264_nvenc"、"h265_nvenc" 或 "libx264"
+        """
         ffmpeg_path = shutil.which("ffmpeg")
         if not ffmpeg_path:
             raise RuntimeError("找不到 ffmpeg，請確認已安裝並加入 PATH")
 
-        # 嘗試 NVENC
+        # 嘗試取得 FFmpeg 支援的編碼器清單
         try:
             proc = await asyncio.create_subprocess_exec(
                 ffmpeg_path, "-hide_banner", "-encoders",
@@ -151,14 +158,24 @@ class FFmpegRenderer:
             )
             stdout, _ = await proc.communicate()
             output = stdout.decode("utf-8", errors="replace")
-            if "h264_nvenc" in output:
-                logger.info("偵測到 NVENC 硬體編碼器")
-                return "h264_nvenc"
+
+            # 依照偏好順序決定 NVENC 優先級
+            # hevc_nvenc 在 FFmpeg 輸出中以 "hevc_nvenc" 顯示
+            if prefer_hevc:
+                nvenc_candidates = [("hevc_nvenc", "h265_nvenc"), ("h264_nvenc", "h264_nvenc")]
+            else:
+                nvenc_candidates = [("h264_nvenc", "h264_nvenc"), ("hevc_nvenc", "h265_nvenc")]
+
+            for ffmpeg_name, return_name in nvenc_candidates:
+                if ffmpeg_name in output:
+                    logger.info(f"偵測到 NVENC 硬體編碼器：{return_name}")
+                    return return_name
         except Exception as e:
             logger.warning(f"偵測 NVENC 失敗: {e}")
 
-        logger.info("使用 libx264 軟體編碼器")
-        return "libx264"
+        fallback = "libx265" if prefer_hevc else "libx264"
+        logger.info(f"NVENC 不可用，使用 {fallback} 軟體編碼器")
+        return fallback
 
     def build_zoompan_expr(
         self, bpm: float, total_frames: int, cycle_offset: int = 0,
@@ -495,7 +512,11 @@ class FFmpegRenderer:
         # 編碼設定
         cmd.extend(["-c:v", encoder])
         if encoder == "h264_nvenc":
+            # NVENC H.264：VBR 品質模式（-crf 不適用於 NVENC）
             cmd.extend(["-preset", "medium", "-rc", "vbr", "-cq", "18"])
+        elif encoder == "h265_nvenc":
+            # NVENC H.265：CQ 28 ≈ H.264 CQ 18 的同等視覺品質
+            cmd.extend(["-preset", "medium", "-rc", "vbr", "-cq", "28"])
         else:
             cmd.extend(["-preset", "medium", "-crf", "18"])
 
@@ -752,7 +773,11 @@ class FFmpegRenderer:
         # 編碼設定
         cmd.extend(["-c:v", encoder])
         if encoder == "h264_nvenc":
+            # NVENC H.264：VBR 品質模式（-crf 不適用於 NVENC）
             cmd.extend(["-preset", "medium", "-rc", "vbr", "-cq", "18"])
+        elif encoder == "h265_nvenc":
+            # NVENC H.265：CQ 28 ≈ H.264 CQ 18 的同等視覺品質
+            cmd.extend(["-preset", "medium", "-rc", "vbr", "-cq", "28"])
         else:
             cmd.extend(["-preset", "medium", "-crf", "18"])
 

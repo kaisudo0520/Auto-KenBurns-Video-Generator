@@ -35,7 +35,7 @@ export interface GPUInfo {
   name?: string;
   memory_total?: number;      // MB
   memory_used?: number;       // MB
-  cuda_version?: string;
+  driver_version?: string;    // NVIDIA 驅動版本（非 CUDA 版本）
   nvenc_available?: boolean;
 }
 

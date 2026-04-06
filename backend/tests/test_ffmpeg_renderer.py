@@ -5,8 +5,10 @@ FFmpegRenderer 單元測試
 不需要實際的 FFmpeg 執行環境。
 """
 
+import asyncio
 import sys
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 import importlib.util
 
 # 直接載入模組，避免觸發 services/__init__.py
@@ -676,3 +678,148 @@ class TestRotationInFilterChain:
         assert len(rotate_exprs) == 2
         # 兩段的相位應不同
         assert rotate_exprs[0] != rotate_exprs[1]
+
+
+class TestDetectEncoder:
+    """測試 detect_encoder 編碼器偵測邏輯
+
+    因測試檔案以 importlib 動態載入 ffmpeg_renderer 模組（未加入 sys.modules），
+    故以 patch.object 直接替換模組內的 shutil / asyncio 屬性，
+    而非使用 patch("ffmpeg_renderer.shutil.which") 字串路徑。
+    """
+
+    # ── 輔助常數 ──────────────────────────────────────────────────────────────
+    # FFmpeg -encoders 輸出的典型片段
+    _OUTPUT_H264_AND_HEVC = (
+        " V..... h264_nvenc           NVIDIA NVENC H.264 encoder\n"
+        " V..... hevc_nvenc           NVIDIA NVENC hevc encoder\n"
+    )
+    _OUTPUT_H264_ONLY = (
+        " V..... h264_nvenc           NVIDIA NVENC H.264 encoder\n"
+    )
+    _OUTPUT_NO_NVENC = (
+        " V..... libx264              libx264 H.264 / AVC / MPEG-4 AVC\n"
+        " V..... libx265              libx265 H.265 / HEVC\n"
+    )
+
+    # ── 輔助方法：建立模擬子程序 ──────────────────────────────────────────────
+    @staticmethod
+    def _make_proc(stdout_text: str) -> MagicMock:
+        """建立模擬 asyncio.subprocess.Process，communicate() 回傳指定的 stdout。"""
+        proc = MagicMock()
+        proc.communicate = AsyncMock(
+            return_value=(stdout_text.encode("utf-8"), b"")
+        )
+        return proc
+
+    @staticmethod
+    def _run(coro):
+        """在新 event loop 中執行協程，避免 loop already running 問題。"""
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    # ── 測試案例 ──────────────────────────────────────────────────────────────
+
+    def test_detect_encoder_h264_nvenc_default(self):
+        """prefer_hevc=False，FFmpeg 輸出包含 h264_nvenc → 回傳 "h264_nvenc"
+
+        預設行為：H.264 NVENC 優先於 HEVC NVENC。
+        """
+        renderer = FFmpegRenderer()
+        proc = self._make_proc(self._OUTPUT_H264_AND_HEVC)
+
+        # 直接替換 ffmpeg_module 內的 shutil.which 與 asyncio.create_subprocess_exec
+        with patch.object(ffmpeg_module.shutil, "which", return_value="/usr/bin/ffmpeg"), \
+             patch.object(ffmpeg_module.asyncio, "create_subprocess_exec", return_value=proc):
+            result = self._run(renderer.detect_encoder(prefer_hevc=False))
+
+        assert result == "h264_nvenc"
+
+    def test_detect_encoder_h265_nvenc_preferred(self):
+        """prefer_hevc=True，FFmpeg 輸出包含 hevc_nvenc → 回傳 "h265_nvenc"
+
+        HEVC 優先模式下，hevc_nvenc 應排在 h264_nvenc 之前被選取。
+        """
+        renderer = FFmpegRenderer()
+        proc = self._make_proc(self._OUTPUT_H264_AND_HEVC)
+
+        with patch.object(ffmpeg_module.shutil, "which", return_value="/usr/bin/ffmpeg"), \
+             patch.object(ffmpeg_module.asyncio, "create_subprocess_exec", return_value=proc):
+            result = self._run(renderer.detect_encoder(prefer_hevc=True))
+
+        assert result == "h265_nvenc"
+
+    def test_detect_encoder_prefer_hevc_fallback_h264(self):
+        """prefer_hevc=True，FFmpeg 輸出只有 h264_nvenc（無 hevc_nvenc）→ 回傳 "h264_nvenc"
+
+        hevc_nvenc 不存在時，應退而選用 h264_nvenc 而非直接 fallback 到軟體編碼器。
+        """
+        renderer = FFmpegRenderer()
+        proc = self._make_proc(self._OUTPUT_H264_ONLY)
+
+        with patch.object(ffmpeg_module.shutil, "which", return_value="/usr/bin/ffmpeg"), \
+             patch.object(ffmpeg_module.asyncio, "create_subprocess_exec", return_value=proc):
+            result = self._run(renderer.detect_encoder(prefer_hevc=True))
+
+        assert result == "h264_nvenc"
+
+    def test_detect_encoder_no_nvenc_fallback_libx264(self):
+        """prefer_hevc=False，FFmpeg 輸出不含任何 NVENC → 回傳 "libx264"
+
+        無硬體編碼器時，預設 fallback 為 libx264 軟體編碼器。
+        """
+        renderer = FFmpegRenderer()
+        proc = self._make_proc(self._OUTPUT_NO_NVENC)
+
+        with patch.object(ffmpeg_module.shutil, "which", return_value="/usr/bin/ffmpeg"), \
+             patch.object(ffmpeg_module.asyncio, "create_subprocess_exec", return_value=proc):
+            result = self._run(renderer.detect_encoder(prefer_hevc=False))
+
+        assert result == "libx264"
+
+    def test_detect_encoder_no_nvenc_fallback_libx265(self):
+        """prefer_hevc=True，FFmpeg 輸出不含任何 NVENC → 回傳 "libx265"
+
+        無硬體編碼器時，HEVC 優先模式的 fallback 為 libx265 軟體編碼器。
+        """
+        renderer = FFmpegRenderer()
+        proc = self._make_proc(self._OUTPUT_NO_NVENC)
+
+        with patch.object(ffmpeg_module.shutil, "which", return_value="/usr/bin/ffmpeg"), \
+             patch.object(ffmpeg_module.asyncio, "create_subprocess_exec", return_value=proc):
+            result = self._run(renderer.detect_encoder(prefer_hevc=True))
+
+        assert result == "libx265"
+
+    def test_detect_encoder_ffmpeg_not_found(self):
+        """shutil.which("ffmpeg") 回傳 None → 拋出 RuntimeError
+
+        系統未安裝 FFmpeg 時，應立即拋出明確的錯誤，而非靜默失敗。
+        """
+        import pytest
+        renderer = FFmpegRenderer()
+
+        with patch.object(ffmpeg_module.shutil, "which", return_value=None):
+            with pytest.raises(RuntimeError, match="ffmpeg"):
+                self._run(renderer.detect_encoder())
+
+    def test_detect_encoder_subprocess_error(self):
+        """subprocess 拋出異常 → fallback 到 "libx264"
+
+        子程序啟動失敗（例如權限問題）時，應捕捉異常並使用軟體編碼器，
+        而非讓整個渲染任務中斷。
+        """
+        renderer = FFmpegRenderer()
+
+        with patch.object(ffmpeg_module.shutil, "which", return_value="/usr/bin/ffmpeg"), \
+             patch.object(
+                 ffmpeg_module.asyncio,
+                 "create_subprocess_exec",
+                 side_effect=OSError("無法啟動 FFmpeg 子程序"),
+             ):
+            result = self._run(renderer.detect_encoder(prefer_hevc=False))
+
+        assert result == "libx264"

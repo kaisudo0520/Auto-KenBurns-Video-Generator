@@ -141,13 +141,15 @@ async def get_system_status():
         "name": None,
         "memory_total": 0,
         "memory_used": 0,
-        "cuda_version": None,
+        "driver_version": None,  # NVIDIA 驅動版本（非 CUDA 版本）
         "nvenc_available": False,
     }
 
-    # Try to get GPU info (simplified - would use pynvml in production)
+    # 嘗試透過 nvidia-smi 取得 GPU 資訊
     try:
-        # Check for NVIDIA GPU via nvidia-smi
+        # 查詢 GPU 名稱、記憶體使用量與驅動版本
+        # 注意：nvidia-smi --query-gpu 無法直接查詢 CUDA 版本，
+        # driver_version 為 NVIDIA 驅動版本（如 "560.35.03"），非 CUDA 版本（如 "12.6"）
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=name,memory.total,memory.used,driver_version", "--format=csv,noheader"],
             capture_output=True,
@@ -163,11 +165,11 @@ async def get_system_status():
                     "name": parts[0].strip() if len(parts) > 0 else "Unknown",
                     "memory_total": int(parts[1].strip().split()[0]) if len(parts) > 1 else 0,
                     "memory_used": int(parts[2].strip().split()[0]) if len(parts) > 2 else 0,
-                    "cuda_version": parts[3].strip() if len(parts) > 3 else None,
+                    "driver_version": parts[3].strip() if len(parts) > 3 else None,
                     "nvenc_available": True,
                 }
     except (subprocess.SubprocessError, FileNotFoundError, IndexError, ValueError):
-        # GPU not available or nvidia-smi not found
+        # GPU 不可用或未安裝 nvidia-smi
         pass
 
     # Get storage information
