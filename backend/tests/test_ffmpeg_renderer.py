@@ -85,9 +85,14 @@ class TestBuildCommandMultiSegment:
         assert "[1:v]" in filter_complex
 
     def test_multi_image_single_audio_segment_durations_evenly_split(self):
-        """多圖 + 1 音訊 → 每段時長 = 音訊總長 / 圖片數"""
+        """多圖 + 1 音訊 → 每段時長 = 音訊總長 / 圖片數
+
+        30 秒音訊 / 3 圖 → 每段 10 秒 (300 幀)。
+        BPM 120 hold = 240 幀 (但 min_motion = max(30, 300/3) = 100)
+        motion = max(100, 300 - 240) = 100 → zoompan d=100
+        hold_frames = 300 - 100 = 200 → tpad stop=200（整數幀）
+        """
         total_audio = 30.0
-        n_images = 3
         cmd = self.renderer.build_command(
             image_paths=[self.img1, self.img2, self.img3],
             audio_paths=[self.audio1],
@@ -97,11 +102,13 @@ class TestBuildCommandMultiSegment:
             encoder="libx264",
             audio_durations=[total_audio],
         )
-        # 每段 10 秒 → 每段 300 幀（d=300）
-        expected_frames = int(total_audio / n_images * 30)
         fc_idx = cmd.index("-filter_complex")
         filter_complex = cmd[fc_idx + 1]
-        assert f"d={expected_frames}" in filter_complex
+        # zoompan d 為 motion_frames=100
+        assert "d=100:" in filter_complex
+        # trim/tpad 在每段存在，hold=200 幀（整數，不受浮點捨入影響）
+        assert "trim=end_frame=100" in filter_complex
+        assert "tpad=stop=200:stop_mode=clone" in filter_complex
 
     def test_multi_image_single_audio_xfade_video_segments(self):
         """多圖 + 1 音訊 → filter_complex 包含 xfade 交叉淡入淡出"""
@@ -472,11 +479,19 @@ class TestRotationExpr:
         assert 8.0 * ratio <= amp <= 15.0 * ratio
 
     def test_rotation_angle_in_range_high_bpm(self):
-        """BPM=200（clamped 至 1.5）時旋轉振幅仍在安全範圍"""
-        _, _, _, rot_info = self.renderer.build_zoompan_expr(bpm=200.0, total_frames=900)
-        amp = rot_info["rotation_amp_deg"]
-        ratio = 1.5  # clamped
-        assert 8.0 * ratio <= amp <= 15.0 * ratio
+        """高 BPM 時旋轉振幅仍在 [8*ratio, 15*ratio] 安全範圍
+
+        clamped_ratio = clamp(bpm/160, 0.5, 1.5)。
+        BPM 240 對應 ratio = 1.5（觸發 clamp 上限），
+        BPM 200 對應 ratio = 1.25（未觸發 clamp）。
+        """
+        for bpm in (200.0, 240.0, 320.0):
+            _, _, _, rot_info = self.renderer.build_zoompan_expr(bpm=bpm, total_frames=900)
+            amp = rot_info["rotation_amp_deg"]
+            ratio = max(0.5, min(bpm / 160.0, 1.5))
+            assert 8.0 * ratio <= amp <= 15.0 * ratio, (
+                f"BPM={bpm}, ratio={ratio}, amp={amp} 超出範圍"
+            )
 
     def test_rotation_expr_uses_sin(self):
         """angle_expr 應包含 sin 函數（正弦擺動）"""
@@ -823,3 +838,452 @@ class TestDetectEncoder:
             result = self._run(renderer.detect_encoder(prefer_hevc=False))
 
         assert result == "libx264"
+
+
+class TestComputeHoldFrames:
+    """測試 BPM 同步 hold 幀數計算"""
+
+    def test_bpm_120_yields_8s_hold(self):
+        """BPM 120：16 拍 = 8s，未觸發 clamp"""
+        assert FFmpegRenderer.compute_hold_frames(120.0, 30) == 240
+
+    def test_bpm_160_yields_6s_hold(self):
+        """BPM 160：16 拍 = 6s"""
+        assert FFmpegRenderer.compute_hold_frames(160.0, 30) == 180
+
+    def test_slow_bpm_clamped_to_max(self):
+        """BPM 60：16 拍 = 16s → clamp 到 10s 上限"""
+        assert FFmpegRenderer.compute_hold_frames(60.0, 30) == 300
+
+    def test_fast_bpm_clamped_to_min(self):
+        """BPM 200：16 拍 = 4.8s → clamp 到 5s 下限"""
+        assert FFmpegRenderer.compute_hold_frames(200.0, 30) == 150
+
+    def test_invalid_bpm_defaults_to_120(self):
+        """BPM <= 0 自動回退 120"""
+        assert FFmpegRenderer.compute_hold_frames(0, 30) == 240
+        assert FFmpegRenderer.compute_hold_frames(-10, 30) == 240
+
+    def test_custom_fps(self):
+        """60fps：BPM 120 → 8s × 60 = 480 幀"""
+        assert FFmpegRenderer.compute_hold_frames(120.0, 60) == 480
+
+    def test_custom_hold_beats(self):
+        """8 拍設定：BPM 120 → 4s（< min_sec 5s，clamp 到 5s）"""
+        assert FFmpegRenderer.compute_hold_frames(120.0, 30, hold_beats=8) == 150
+
+
+class TestSegmentHoldTpad:
+    """測試段間 hold 以 trim+tpad=stop_mode=clone 硬凍結實作"""
+
+    def test_zoompan_expressions_remain_clean(self):
+        """表達式層不再包含 if/gt clamp（改由 filter chain 處理）"""
+        r = FFmpegRenderer(fps=30)
+        z, x, y, rot = r.build_zoompan_expr(120.0, 600)
+        assert "if(gt(on," not in z
+        assert "if(gt(on," not in x
+        assert "if(gt(on," not in y
+        assert "if(gt(n," not in rot["angle_expr"]
+
+    def test_multi_segment_contains_trim_and_tpad(self):
+        """多段模式應插入 trim=end_frame + tpad=stop=N:stop_mode=clone"""
+        renderer = FFmpegRenderer(fps=30)
+        cmd = renderer.build_command(
+            image_paths=["/tmp/a.jpg", "/tmp/b.jpg"],
+            audio_paths=["/tmp/a.mp3", "/tmp/b.mp3"],
+            output_path="/tmp/out.mp4",
+            bpm=120.0,
+            total_duration=40.0,
+            audio_durations=[20.0, 20.0],
+            bpms=[120.0, 120.0],
+        )
+        fc_idx = cmd.index("-filter_complex") + 1
+        fc = cmd[fc_idx]
+        # BPM 120: hold=240 frames (8s), seg=600 frames → motion=360
+        assert "trim=end_frame=360" in fc
+        assert "setpts=PTS-STARTPTS" in fc
+        # 使用整數 stop=N（非浮點 stop_duration），避免幀數捨入漂移
+        assert "tpad=stop=240:stop_mode=clone" in fc
+
+    def test_tpad_uses_integer_stop_not_float_duration(self):
+        """tpad 必須用整數 stop=N 而非浮點 stop_duration=X（防 regression）"""
+        renderer = FFmpegRenderer(fps=30)
+        cmd = renderer.build_command(
+            image_paths=["/tmp/a.jpg", "/tmp/b.jpg"],
+            audio_paths=["/tmp/a.mp3", "/tmp/b.mp3"],
+            output_path="/tmp/out.mp4",
+            bpm=120.0,
+            total_duration=40.0,
+            audio_durations=[20.0, 20.0],
+            bpms=[120.0, 120.0],
+        )
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        assert "stop_duration=" not in fc
+        assert "tpad=stop=" in fc
+
+    def test_ultra_short_segment_no_hold_no_double_comma(self):
+        """極短段（seg < min_motion）→ hold_frames=0，過濾器鏈不可有 `,,` 雙逗號
+
+        seg=2s=60 幀, BPM 120 hold_req=240, min_motion=max(30,20)=30
+        motion=max(30, 60-240)=max(30,-180)=30, 但 hold_frames_req=240 > seg,
+        所以 motion 會是 max(30, 60-240)=30 → hold=60-30=30.
+        但若 seg 更短：seg=30 幀 (1s), min_motion=max(30,10)=30,
+        motion=max(30, 30-240)=30, hold=30-30=0 → 觸發 hold_frames=0 路徑。
+        """
+        renderer = FFmpegRenderer(fps=30)
+        cmd = renderer.build_command(
+            image_paths=["/tmp/a.jpg", "/tmp/b.jpg"],
+            audio_paths=["/tmp/a.mp3", "/tmp/b.mp3"],
+            output_path="/tmp/out.mp4",
+            bpm=120.0,
+            total_duration=2.0,
+            audio_durations=[1.0, 1.0],
+            bpms=[120.0, 120.0],
+            crossfade_duration=0.1,
+        )
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        # hold=0 時不應有 trim/tpad
+        assert "trim=end_frame" not in fc
+        assert "tpad=" not in fc
+        # 關鍵：不可有雙逗號（FFmpeg 會拒絕）
+        assert ",," not in fc
+        # zoompan d=motion_frames=30（整段都是運鏡）
+        assert ":d=30:" in fc
+
+    def test_multi_segment_zoompan_d_equals_motion_frames(self):
+        """zoompan 的 d= 應為 motion_frames（非 seg_frames）"""
+        renderer = FFmpegRenderer(fps=30)
+        cmd = renderer.build_command(
+            image_paths=["/tmp/a.jpg", "/tmp/b.jpg"],
+            audio_paths=["/tmp/a.mp3", "/tmp/b.mp3"],
+            output_path="/tmp/out.mp4",
+            bpm=120.0,
+            total_duration=40.0,
+            audio_durations=[20.0, 20.0],
+            bpms=[120.0, 120.0],
+        )
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        assert ":d=360:" in fc   # motion 360 幀
+        assert ":d=600:" not in fc  # 不再直接用 seg_frames
+
+    def test_single_segment_no_tpad_when_intra_hold_disabled(self):
+        """intra_hold=False 時單段維持純運鏡，不套 tpad"""
+        renderer = FFmpegRenderer(fps=30)
+        cmd = renderer.build_command(
+            image_paths=["/tmp/a.jpg"],
+            audio_paths=["/tmp/a.mp3"],
+            output_path="/tmp/out.mp4",
+            bpm=120.0,
+            total_duration=20.0,
+            intra_hold=False,
+        )
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        assert "tpad" not in fc
+        assert "trim=end_frame" not in fc
+
+    def test_short_duration_below_threshold_no_intra_hold(self):
+        """時長 < 20s 不觸發段內停頓（即使 intra_hold 預設 True）"""
+        renderer = FFmpegRenderer(fps=30)
+        cmd = renderer.build_command(
+            image_paths=["/tmp/a.jpg"],
+            audio_paths=["/tmp/a.mp3"],
+            output_path="/tmp/out.mp4",
+            bpm=120.0,
+            total_duration=15.0,
+        )
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        assert "tpad" not in fc
+        assert "trim=end_frame" not in fc
+
+    def test_short_segment_falls_back_to_min_motion(self):
+        """極短段：motion 保留至少 1/3 段時長或 1 秒，hold 縮短
+
+        seg=9s (270 幀), BPM 120 hold 需求=240 幀 → min_motion=max(30,90)=90
+        motion=max(90, 270-240)=90 → hold=180 幀（整數，6s）
+        """
+        renderer = FFmpegRenderer(fps=30)
+        cmd = renderer.build_command(
+            image_paths=["/tmp/a.jpg", "/tmp/b.jpg"],
+            audio_paths=["/tmp/a.mp3", "/tmp/b.mp3"],
+            output_path="/tmp/out.mp4",
+            bpm=120.0,
+            total_duration=18.0,
+            audio_durations=[9.0, 9.0],
+            bpms=[120.0, 120.0],
+            crossfade_duration=0.5,
+        )
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        assert "trim=end_frame=90" in fc
+        assert "tpad=stop=180:stop_mode=clone" in fc
+
+    def test_build_zoompan_expr_no_motion_frames_param(self):
+        """build_zoompan_expr 不再接受 motion_frames 參數（已移除）"""
+        import inspect
+        sig = inspect.signature(FFmpegRenderer.build_zoompan_expr)
+        assert "motion_frames" not in sig.parameters
+
+
+class TestIntraHoldExpansion:
+    """測試 1 圖 + 1 音樂長曲自動切段為 pseudo-segments 的段內週期性停頓"""
+
+    def test_long_audio_triggers_pseudo_segmentation(self):
+        """3 分鐘音訊 → 自動拆成 9 個 pseudo-segments（180/20=9）"""
+        renderer = FFmpegRenderer(fps=30)
+        cmd = renderer.build_command(
+            image_paths=["/tmp/a.jpg"],
+            audio_paths=["/tmp/a.mp3"],
+            output_path="/tmp/out.mp4",
+            bpm=120.0,
+            total_duration=180.0,
+        )
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        # 多段路徑才有 tpad
+        assert "tpad=stop=" in fc
+        # 同圖多段用 split 分流
+        assert "[0:v]split=9" in fc
+        # 應產生 9 個 [vN] 輸出（0..8）
+        for i in range(9):
+            assert f"[v{i}]" in fc
+        # concat 9 段（無 xfade）
+        assert "concat=n=9" in fc
+
+    def test_intra_hold_uses_concat_not_xfade(self):
+        """段內 hold 為保留完整音訊，使用 concat 不 xfade"""
+        renderer = FFmpegRenderer(fps=30)
+        cmd = renderer.build_command(
+            image_paths=["/tmp/a.jpg"],
+            audio_paths=["/tmp/a.mp3"],
+            output_path="/tmp/out.mp4",
+            bpm=120.0,
+            total_duration=60.0,
+        )
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        assert "xfade=" not in fc
+        assert "concat=" in fc
+
+    def test_intra_hold_single_audio_afade_spans_full_duration(self):
+        """單音訊仍以 afade 套在完整長度（不受 xfade 重疊縮減）"""
+        renderer = FFmpegRenderer(fps=30)
+        cmd = renderer.build_command(
+            image_paths=["/tmp/a.jpg"],
+            audio_paths=["/tmp/a.mp3"],
+            output_path="/tmp/out.mp4",
+            bpm=120.0,
+            total_duration=60.0,
+        )
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        # 音訊 afade_out 應以 effective_total=60 為基準，58.5 = 60 - 1.5
+        assert "afade=t=out:st=58.50" in fc
+        # -t 應為完整 60 秒
+        t_idx = cmd.index("-t") + 1
+        assert cmd[t_idx] == "60.00"
+
+    def test_intra_hold_disabled_by_flag(self):
+        """intra_hold=False 時保持原本單段行為"""
+        renderer = FFmpegRenderer(fps=30)
+        cmd = renderer.build_command(
+            image_paths=["/tmp/a.jpg"],
+            audio_paths=["/tmp/a.mp3"],
+            output_path="/tmp/out.mp4",
+            bpm=120.0,
+            total_duration=180.0,
+            intra_hold=False,
+        )
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        assert "tpad" not in fc
+        assert "split" not in fc
+        assert "concat" not in fc
+
+    def test_intra_hold_skipped_for_multi_image(self):
+        """多圖模式不受 intra_hold 影響（走原本多段邏輯）"""
+        renderer = FFmpegRenderer(fps=30)
+        cmd = renderer.build_command(
+            image_paths=["/tmp/a.jpg", "/tmp/b.jpg"],
+            audio_paths=["/tmp/a.mp3"],
+            output_path="/tmp/out.mp4",
+            bpm=120.0,
+            total_duration=180.0,
+            audio_durations=[180.0],
+        )
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        # 2 圖 → 2 段，保留 xfade 模式（不是 9 段 concat）
+        assert "concat=n=9" not in fc
+        assert "concat=n=2" not in fc  # 2 段用 xfade
+        assert "xfade=" in fc
+
+    def test_intra_hold_skipped_for_multi_audio(self):
+        """多音訊模式不受 intra_hold 影響"""
+        renderer = FFmpegRenderer(fps=30)
+        cmd = renderer.build_command(
+            image_paths=["/tmp/a.jpg"],
+            audio_paths=["/tmp/a.mp3", "/tmp/b.mp3"],
+            output_path="/tmp/out.mp4",
+            bpm=120.0,
+            total_duration=180.0,
+            audio_durations=[90.0, 90.0],
+        )
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        # 2 音訊 → 2 段（單圖走 split 分流）
+        assert "[0:v]split=2" in fc
+        assert "xfade=" in fc
+
+    def test_pseudo_segment_count_rounding(self):
+        """n_pseudo = max(2, round(total / 20))"""
+        renderer = FFmpegRenderer(fps=30)
+        # 30s → round(1.5)=2（banker's round），max(2,2)=2
+        cmd = renderer.build_command(
+            image_paths=["/tmp/a.jpg"],
+            audio_paths=["/tmp/a.mp3"],
+            output_path="/tmp/out.mp4",
+            bpm=120.0, total_duration=30.0,
+        )
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        assert "[0:v]split=2" in fc
+        # 60s → round(3.0)=3
+        cmd = renderer.build_command(
+            image_paths=["/tmp/a.jpg"],
+            audio_paths=["/tmp/a.mp3"],
+            output_path="/tmp/out.mp4",
+            bpm=120.0, total_duration=60.0,
+        )
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        assert "[0:v]split=3" in fc
+
+
+class TestContinuousMotion:
+    """測試連續運動模式(共用 seed + 相位接續)確保 hold 後無視覺斷點"""
+
+    def test_seeded_rng_produces_deterministic_amplitudes(self):
+        """同一 seed 應產生相同振幅"""
+        r = FFmpegRenderer(fps=30)
+        z1, x1, y1, rot1 = r.build_zoompan_expr(120.0, 600, seed=42)
+        z2, x2, y2, rot2 = r.build_zoompan_expr(120.0, 600, seed=42)
+        assert z1 == z2
+        assert x1 == x2
+        assert y1 == y2
+        assert rot1["rotation_amp_deg"] == rot2["rotation_amp_deg"]
+
+    def test_different_seeds_produce_different_amplitudes(self):
+        r = FFmpegRenderer(fps=30)
+        z1, _, _, _ = r.build_zoompan_expr(120.0, 600, seed=1)
+        z2, _, _, _ = r.build_zoompan_expr(120.0, 600, seed=2)
+        assert z1 != z2
+
+    def test_frame_phase_offset_shifts_on_variable(self):
+        """frame_phase_offset > 0 時表達式應以 (on+offset) 取代 on"""
+        r = FFmpegRenderer(fps=30)
+        z, x, y, rot = r.build_zoompan_expr(
+            120.0, 600, seed=42, frame_phase_offset=360
+        )
+        assert "(on+360)" in z
+        assert "(on+360)" in x
+        assert "(on+360)" in y
+        assert "(n+360)" in rot["angle_expr"]
+
+    def test_frame_phase_offset_zero_uses_bare_on(self):
+        """frame_phase_offset=0 時表達式使用原本的 on / n"""
+        r = FFmpegRenderer(fps=30)
+        z, x, y, rot = r.build_zoompan_expr(120.0, 600, seed=42)
+        assert "(on+" not in z
+        assert "(on+" not in x
+        assert "(on+" not in y
+        assert "(n+" not in rot["angle_expr"]
+
+    def test_intra_hold_triggers_continuous_motion(self):
+        """1 圖 + 1 音樂長曲:每個 pseudo-segment 的 on 都被 offset 替換"""
+        renderer = FFmpegRenderer(fps=30)
+        cmd = renderer.build_command(
+            image_paths=["/tmp/a.jpg"],
+            audio_paths=["/tmp/a.mp3"],
+            output_path="/tmp/out.mp4",
+            bpm=120.0,
+            total_duration=60.0,
+        )
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        # BPM 120, seg=20s=600 幀, motion=360 幀 → 第 2 段 offset=360, 第 3 段=720
+        assert "(on+360)" in fc
+        assert "(on+720)" in fc
+        assert "(n+360)" in fc
+        assert "(n+720)" in fc
+
+    def test_seeded_mode_skips_ema_smoothing(self):
+        """連續運動模式（seed 已指定）應直接使用 target，不含 px/py EMA
+
+        zoompan 的 px/py 每段 filter instance 重置為 0，使用
+        `px + α*(target-px)` 會在段開頭 0.8s 內從 0 收斂到 target，
+        破壞段間連續性。seeded 模式必須跳過 EMA。
+        """
+        r = FFmpegRenderer(fps=30)
+        z, x, y, _ = r.build_zoompan_expr(120.0, 600, seed=42)
+        assert "px+" not in x  # 無 EMA
+        assert "py+" not in y  # 無 EMA
+        # 正常模式仍使用 EMA
+        z2, x2, y2, _ = r.build_zoompan_expr(120.0, 600)
+        assert "px+" in x2
+        assert "py+" in y2
+
+    def test_multi_image_non_intra_hold_does_not_use_continuous_motion(self):
+        """多圖模式(非 intra_hold)不啟用連續運動,每段各自不同軌跡"""
+        renderer = FFmpegRenderer(fps=30)
+        cmd = renderer.build_command(
+            image_paths=["/tmp/a.jpg", "/tmp/b.jpg"],
+            audio_paths=["/tmp/a.mp3"],
+            output_path="/tmp/out.mp4",
+            bpm=120.0,
+            total_duration=40.0,
+            audio_durations=[40.0],
+        )
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        # 不使用 (on+offset) 格式(各段 cycle_offset 不同就夠了)
+        assert "(on+" not in fc
+        assert "(n+" not in fc
+
+
+class TestBitrateSettings:
+    """測試 8 Mbps 位元率上限"""
+
+    def _build_single_cmd(self, encoder: str):
+        renderer = FFmpegRenderer(fps=30)
+        return renderer.build_command(
+            image_paths=["/tmp/a.jpg"],
+            audio_paths=["/tmp/a.mp3"],
+            output_path="/tmp/out.mp4",
+            bpm=120.0,
+            total_duration=10.0,
+            encoder=encoder,
+        )
+
+    def test_h264_nvenc_has_vbr_bitrate_cap(self):
+        cmd = self._build_single_cmd("h264_nvenc")
+        assert "-rc" in cmd and cmd[cmd.index("-rc") + 1] == "vbr"
+        assert "-b:v" in cmd and cmd[cmd.index("-b:v") + 1] == "8M"
+        assert "-maxrate" in cmd and cmd[cmd.index("-maxrate") + 1] == "10M"
+        assert "-bufsize" in cmd and cmd[cmd.index("-bufsize") + 1] == "16M"
+        assert "-cq" not in cmd  # 改用位元率控制，不再使用 -cq
+
+    def test_h265_nvenc_has_vbr_bitrate_cap(self):
+        cmd = self._build_single_cmd("h265_nvenc")
+        assert cmd[cmd.index("-rc") + 1] == "vbr"
+        assert cmd[cmd.index("-b:v") + 1] == "8M"
+        assert cmd[cmd.index("-maxrate") + 1] == "10M"
+        assert cmd[cmd.index("-bufsize") + 1] == "16M"
+
+    def test_libx264_has_crf_with_maxrate(self):
+        cmd = self._build_single_cmd("libx264")
+        assert "-crf" in cmd and cmd[cmd.index("-crf") + 1] == "20"
+        assert cmd[cmd.index("-maxrate") + 1] == "10M"
+        assert cmd[cmd.index("-bufsize") + 1] == "16M"
+
+    def test_multi_segment_applies_bitrate_cap(self):
+        renderer = FFmpegRenderer(fps=30)
+        cmd = renderer.build_command(
+            image_paths=["/tmp/a.jpg", "/tmp/b.jpg"],
+            audio_paths=["/tmp/a.mp3", "/tmp/b.mp3"],
+            output_path="/tmp/out.mp4",
+            bpm=120.0,
+            total_duration=40.0,
+            encoder="h264_nvenc",
+            audio_durations=[20.0, 20.0],
+        )
+        assert cmd[cmd.index("-b:v") + 1] == "8M"
+        assert cmd[cmd.index("-maxrate") + 1] == "10M"

@@ -4,7 +4,7 @@
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-green?logo=fastapi)
 ![Vue 3](https://img.shields.io/badge/Vue-3+-42b883?logo=vue.js)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5+-3178c6?logo=typescript)
-![Tests](https://img.shields.io/badge/Tests-159%20passed-green)
+![Tests](https://img.shields.io/badge/Tests-199%20passed-green)
 ![Coverage](https://img.shields.io/badge/Coverage-80%25-yellow)
 
 ## 專案概述
@@ -15,14 +15,16 @@
 
 - 圖片拖曳上傳與拖曳排序（支援 JPG, PNG, WebP）
 - 音樂拖曳上傳與拖曳排序（支援 MP3, WAV, OGG）
-- **BPM 驅動 XYZ 統一特效**：使用 Librosa 分析音樂 BPM，以多頻黃金比例正弦疊加驅動 XYZ 三軸同步運作，形成 3D Lissajous 軌跡
-- **隨機化強弱動態**：各軸振幅在範圍內隨機生成，確保每次渲染效果具備獨特性（如推軌、呼吸式縮放等）
-- **動漫臉部保護**：自動偵測動漫角色臉部（含側臉），限制平移振幅並調整中心偏移，確保 Ken-Burns 效果不裁切臉部
-- 畫面淡入淡出效果（段間 fade + 音訊整體首尾 fade）
+- **BPM 驅動 XYZR 四軸統一特效**：使用 Librosa 分析音樂 BPM，以 4 層黃金比例正弦疊加驅動 XYZ 三軸 + 旋轉搖擺同步運作，形成 4D 運動軌跡
+- **隨機化強弱動態**：各軸振幅在範圍內隨機生成，確保每次渲染效果具備獨特性
+- **動漫臉部保護**：自動偵測動漫角色臉部（含側臉），限制平移振幅並調整中心偏移
+- **段間/段內 BPM 同步停頓**：每段運鏡跑完後 tpad 硬複製最後一幀定格 5–10 秒讓眼睛休息，1 圖 + 1 音樂長曲自動拆段啟用「連續運動模式」（seed + 相位接續）確保 hold 後重啟無視覺斷點
+- **位元率上限**：8 Mbps 目標 / 10 Mbps 峰值 / 16 Mbps buffer，NVENC 與 libx264 一致
+- 畫面淡入淡出效果（段間 xfade + 音訊整體首尾 fade）
 - **FFmpeg 實際渲染**：使用 zoompan 濾鏡產生真實 Ken-Burns 影片
 - 即時渲染進度（WebSocket + `-progress pipe:1` 解析）
 - NVENC GPU 硬體加速（自動偵測，fallback 至 libx264）
-- 多音訊自動串接（FFmpeg concat 濾鏡，段間無淡入淡出，僅整體首尾 1.5 秒 fade）
+- 多音訊自動串接（xfade/acrossfade 交叉淡入淡出）
 - 渲染取消支援（即時終止 FFmpeg 進程）
 - 輸出後一鍵開啟資料夾
 - 深色主題現代化 UI
@@ -143,34 +145,63 @@ uvicorn backend.main:app --host 0.0.0.0 --port 8000 --workers 4
 
 系統使用 Librosa 分析音樂 BPM，以多頻正弦疊加驅動 FFmpeg zoompan 濾鏡的縮放與平移。
 
-**運動設計**（統一 3D 攝影機模型）：
-- **XYZ 三軸同步（100%）**：3 層黃金比例頻率正弦疊加，XYZ 同時運作，形成流暢的 3D Lissajous 飛行軌跡
-- **隨機權重組合**：每次渲染隨機分配各軸振幅，可能產生純縮放、純平移或複雜的對角線複合運動
-- **縮放/平移一體化**：移除舊有延遲抑制（pan_mod），實現全時連貫運動
+**運動設計**（Overscan 雙向縮放 + 統一 3D 攝影機模型 + 旋轉搖擺）：
+- **Overscan 緩衝區**：`base_zoom=1.15`，圖片初始只顯示 ~85%，多出 15% 為移動緩衝區
+- **雙向縮放**：`z = base_zoom ± amp/2`，可 zoom in 也可 zoom out，全程都有平移空間
+- **XYZR 四軸同步**：4 層黃金比例頻率正弦疊加，XYZ + 旋轉同時運作，形成 4D 運動軌跡
+- **旋轉搖擺**：BPM 同步正弦擺動（8–15°），模擬攝影機搖擺動感
+- **隨機振幅組合**：各軸振幅在範圍內隨機生成，確保每次渲染具備獨特性
 - **微動呼吸感**：低振幅高頻正弦（畫面 0.2%），模擬攝影機手持質感
 
-| 參數 | 週期/數值 | 說明 |
-|------|-----------|------|
-| 縮放週期 | 16 小節 | BPM 160: 24s, BPM 120: 32s, BPM 80: 48s |
-| 平移基頻 | 4 小節 | 60% 權重，從容的平移節奏 |
-| 平移二次頻 | 基頻 × φ | 30% 權重，黃金比例 |
-| 平移三次頻 | 基頻 × φ² | 10% 權重 |
+| 參數 | 週期 / 數值 | 說明 |
+|------|-------------|------|
+| 縮放週期 (Z) | 10 小節 | BPM 160: 15s, BPM 120: 20s, BPM 80: 30s |
+| 平移基頻 (X) | 2.5 小節 | 50% 權重 |
+| 平移二次頻 | 基頻 × φ | 25% 權重，黃金比例 |
+| 平移三次頻 | 基頻 × φ² | 15% 權重 |
+| 平移四次頻 | 基頻 × φ³ | 10% 權重（高頻微擾） |
+| 旋轉週期 (R) | 10/φ ≈ 6.18 小節 | 與縮放黃金比例偏移，永不同步 |
 
 **BPM 動態調整**（以 BPM 160 為基準）：
 - `clamped_ratio = clamp(bpm/160, 0.5, 1.5)`
 - **隨機振幅範圍** (均需 × ratio)：
-  - 縮放幅度 (Z)：`random(0.04, 0.25)`
-  - 水平振幅 (X)：`random(0.005, 0.055)`
-  - 垂直振幅 (Y)：`random(0.003, 0.038)`
+  - 縮放幅度 (Z)：`random(0.10, 0.28)`（雙向，實際半振幅）
+  - 水平振幅 (X)：`random(0.02, 0.10)`
+  - 垂直振幅 (Y)：`random(0.015, 0.07)`
+  - 旋轉振幅 (R)：`random(8, 15)°`
+
+### 段間 BPM 同步停頓（所有多段模式自動套用）
+
+每段運鏡跑完後以 `trim=end_frame + tpad=stop=N:stop_mode=clone` 硬複製最後一幀凍結 5–10 秒讓觀眾消化畫面：
+
+- hold 時長 = `16 拍 × 60 / BPM`，clamp 在 `[5, 10]` 秒
+  - BPM 120 → 8s、BPM 160 → 6s、BPM 60 → 10s、BPM 200 → 5s
+- 至少保留 `max(1s, seg/3)` 運鏡時長，避免極短段完全被 hold 吃掉
+- 使用**整數 `stop=N` 幀**，無浮點捨入漂移
+- `tpad=stop_mode=clone` 為 bit-identical 硬複製，編碼器看到相同幀高效壓縮
+
+### 段內週期性停頓（1 圖 + 1 音樂長曲）
+
+`build_command` 接收單圖單音樂且 `total_duration >= 20s` 時自動拆成 pseudo-segments：
+
+- `n_pseudo = max(2, round(total / 20))`，目標每段 ~20s（約 12s 運鏡 + 8s 停頓）
+- `crossfade_duration = 0` 走 concat 串接，**保留完整音訊不截斷**
+- **連續運動模式**確保 hold 後重啟無視覺斷點：
+  1. 所有 pseudo-segments 共用 seed → 同一條動畫軌跡
+  2. 相位累積 `on → (on + i × motion_frames)` → 接續前段結束處
+  3. 略過 EMA 平滑 → 避免 `px/py` 重置為 0 的啟動瞬態
+- 可用 `intra_hold=False` 參數關閉
 
 ### 多段渲染
 
 多圖 + 多音訊的渲染策略：
 - 每首音訊配一張圖片（圖片循環分配），每段獨立 zoompan + 獨立 BPM
-- 影片段間：每段獨立 `fade=in` / `fade=out`（1 秒），再用 `concat` 串接
-- 音訊段間：直接 `concat` 串接，僅整體首尾 1.5 秒 `afade`
+- 影片段間：xfade 交叉淡入淡出（首末段外加 fade=in / fade=out）
+- 音訊段間：acrossfade 交叉淡入淡出，整體首尾 1.5 秒 afade
+- xfade/acrossfade offset 以**整數幀換算**的影片時長計算，避免浮點累積
 - `cycle_offset × 黃金角(2.4 rad)` 確保跨段相位連續不重複
-- 有效時長 = Σ(音訊時長)
+- 有效時長 = Σ(音訊時長) − (段數−1) × crossfade_duration
+- **同圖多段優化**：以 `split=N` 分流單一圖片輸入，避免黑畫面問題
 
 ### 動漫臉部保護
 
@@ -214,9 +245,9 @@ npm run test
 
 | 類別 | 數量 |
 |------|------|
-| 後端測試 | 141 |
+| 後端測試 | 181 |
 | 前端測試 | 18 |
-| **總計** | **159** |
+| **總計** | **199** |
 
 ## 專案結構
 

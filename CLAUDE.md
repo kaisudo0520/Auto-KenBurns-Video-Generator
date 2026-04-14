@@ -111,9 +111,9 @@ npm run test
 
 | 類別 | 數量 |
 |------|------|
-| 後端測試 | 141 |
+| 後端測試 | 181 |
 | 前端測試 | 18 |
-| **總計** | **159** |
+| **總計** | **199** |
 
 ## Important Design Notes
 
@@ -176,12 +176,43 @@ FFmpeg 使用 `zoompan` 濾鏡搭配 BPM 驅動的 **XYZ 三軸統一表達式**
 **多段渲染**（多圖 + 多音訊）：
 - 每首音訊配一張圖片（圖片循環分配），每段獨立 zoompan + 獨立 BPM
 - **多段模式觸發條件**：圖片數 > 1 **或** 音訊數 > 1（兩者任一滿足即進入多段）
-- 影片段間：每段獨立 `fade=in` / `fade=out`（1 秒），再用 `concat` 串接
-- 音訊段間：直接 `concat` 串接（段間無淡入淡出），僅整體首尾 1.5 秒 `afade`
+- 影片段間：xfade 交叉淡入淡出（首末段外加 `fade=in` / `fade=out`）
+- 音訊段間：`acrossfade` 交叉淡入淡出，整體首尾 1.5 秒 `afade`
 - `cycle_offset × 黃金角(2.4 rad)` 確保跨段相位連續不重複
-- 有效時長 = Σ(音訊時長)
+- xfade/acrossfade offset 以**整數幀換算**的影片時長計算（`seg_video_durations`），避免浮點誤差累積
+- 有效時長 = Σ(音訊時長) - (段數-1) × crossfade_duration
 - **同圖多段優化**：所有段使用同一張圖片時，以 `split=N` 濾鏡分流單一輸入，
   避免重複開啟同一檔案導致後續段落黑畫面的 FFmpeg 問題
+
+**段間 BPM 同步停頓**（所有多段模式自動套用）：
+- 每段尾部以 `trim=end_frame=motion_frames, setpts=PTS-STARTPTS` 切掉 zoompan 無限輸出後，
+  在 rotate+crop 之後插入 `tpad=stop=hold_frames:stop_mode=clone` 硬複製最後一幀
+- hold 時長公式：`16 拍 × 60/BPM`，clamp 在 `[5, 10]` 秒
+  - BPM 120 → 8s、BPM 160 → 6s、BPM 60 → clamp 10s、BPM 200 → clamp 5s
+- 至少保留 `max(1s, seg/3)` 運鏡時長，避免極短段完全被 hold 吃掉
+- 使用**整數 `stop=N` 幀**而非浮點 `stop_duration=秒`，避免捨入漂移
+- 為何不用表達式層 `if(gt(on,M),M,on)` clamp：
+  1. `px + α×(target - px)` EMA 平滑在凍結後有 0.8s 拖尾（視覺上像運鏡變慢而非停格）
+  2. FFmpeg `pow(if(...),N)` 巢狀逗號解析有風險
+  - `tpad=stop_mode=clone` 為硬複製，逐 bit 一致凍結，編碼器看到相同幀高效壓縮
+
+**段內週期性停頓（intra_hold）**（1 圖 + 1 音樂長曲）：
+- `build_command` 接收單圖單音樂且 `total_duration >= 20s` 時，自動拆成
+  `n_pseudo = max(2, round(total / 20))` 個 pseudo-segments，觸發多段邏輯
+- `crossfade_duration = 0` 強制走 concat 串接，**保留完整音訊不截斷**
+- `continuous_motion=True` 啟用**連續運動模式**，確保 hold 定格後下一段運鏡無視覺斷點：
+  1. **共用 seed**：所有 pseudo-segments 共享一組隨機振幅（軌跡完全相同）
+  2. **相位累積**：第 i 段傳入 `frame_phase_offset = i × motion_frames`，
+     表達式內 `on → (on+offset)` 純常數位移，讓本段從前一段結束處接續
+  3. **略過 EMA**：連續運動模式下 `x_expr = x_target` 直接取目標位置，
+     避免 zoompan 每段 `px/py` 重置為 0 的啟動瞬態破壞連續性
+- 可透過 `intra_hold=False` 參數關閉
+- Lossless 驗證：邊界跳躍量 ≈ 正常運鏡量（~1.7 vs ~1.8），hold 內部 delta = 0
+
+**位元率控制**（`FFmpegRenderer.VIDEO_BITRATE/MAXRATE/BUFSIZE`）：
+- NVENC（h264/h265）：`-rc vbr -b:v 8M -maxrate 10M -bufsize 16M`
+- libx264/libx265：`-crf 20 -maxrate 10M -bufsize 16M`（capped CRF）
+- 由 `_apply_encoder_settings()` classmethod 統一處理單段與多段路徑
 
 編碼器自動偵測：優先使用 `h264_nvenc` (NVENC GPU)，fallback 至 `libx264`。
 進度追蹤：FFmpeg `-progress pipe:1` 解析 `out_time_us`。
