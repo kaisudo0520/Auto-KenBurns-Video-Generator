@@ -467,11 +467,15 @@ class KenBurnsService:
         margin: float = 0.01,
     ) -> Optional[Dict]:
         """
-        根據臉部偵測結果計算安全的平移參數
+        根據臉部偵測結果計算安全的平移參數（保護 80% 頭部範圍）
 
         數學原理：
-        1. 中心偏移：將平移基準從影像中心偏移到臉部中心
-        2. 安全振幅鉗制：確保最大縮放+最大平移時，臉部仍完全在 viewport 內
+        1. 頭部估算：以臉框為基礎估算頭部輪廓（頭髮讓中心上移 0.2×fh，
+           尺寸放大為寬 1.15×、高 1.4×），保護其中 80% 範圍
+        2. 中心偏移：將平移基準偏移到頭部中心
+        3. 安全振幅鉗制：確保最大縮放+最大平移時，頭部仍完全在 viewport 內
+        4. 非對稱自由側偏向：頭部貼邊時，viewport 朝反方向微偏，
+           讓鏡頭運動有更多空間延伸向畫面的自由區域
 
         Args:
             subject_regions: 偵測結果列表（由 face_detection_service 產出）
@@ -505,31 +509,32 @@ class KenBurnsService:
         fw = bounds["width"]
         fh = bounds["height"]
 
-        # 臉部中心（0~1 正規化座標）
+        # === 頭部估算（動漫角色：頭髮讓頭部中心位於臉框中心上方 ~0.2×fh）===
+        # 頭部輪廓 ≈ 臉框 × (1.15 寬, 1.4 高)。
+        # 本系統保護 80% 頭部範圍：head_half = 臉框半軸 × 比例係數 × 0.8
         face_cx = fx + fw / 2
-        face_cy = fy + fh / 2
+        head_cy = (fy + fh / 2) - 0.2 * fh
 
         # 中心偏移量（相對於影像中心 0.5）
-        cx_offset = face_cx - 0.5
-        cy_offset = face_cy - 0.5
+        cx_offset_raw = face_cx - 0.5
+        cy_offset_raw = head_cy - 0.5
 
-        # 只保護五官核心區域（不含頭髮），換取更大動態範圍
-        # 五官大約佔臉部框的 60%（去除額頭髮際線和下巴邊緣）
-        face_half_x = fw / 2 * 0.6
-        face_half_y = fh / 2 * 0.6
+        # 80% 頭部保護半徑
+        head_half_x = fw / 2 * 1.15 * 0.8   # ≈ 0.46 × fw
+        head_half_y = fh / 2 * 1.40 * 0.8   # ≈ 0.56 × fh
 
         # 安全振幅鉗制：
         # viewport 半寬 = 0.5 / z_max（z_max 時 viewport 最小）
-        # 最大平移時，臉部邊緣必須在 viewport 內
-        # max_safe_pan = viewport_half - face_half - margin - |offset|
+        # 最大平移時，頭部邊緣必須在 viewport 內
+        # max_safe_pan = viewport_half - head_half - margin - |offset|
         # 雙向縮放模式：base_zoom=1.15, z_max = base_zoom + amp/2
         base_zoom = 1.15
         z_max = base_zoom + zoom_amp / 2.0
         vp_half_x = 0.5 / z_max
         vp_half_y = 0.5 / z_max
 
-        max_safe_x = vp_half_x - face_half_x - margin - abs(cx_offset)
-        max_safe_y = vp_half_y - face_half_y - margin - abs(cy_offset)
+        max_safe_x = vp_half_x - head_half_x - margin - abs(cx_offset_raw)
+        max_safe_y = vp_half_y - head_half_y - margin - abs(cy_offset_raw)
 
         # 鉗制到最小值 0.01（保證最低限度的平移動感）
         safe_pan_amp_x = min(default_pan_amp_x, max(0.01, max_safe_x))
@@ -544,21 +549,40 @@ class KenBurnsService:
         max_offset_x = max(0.0, 0.5 * (1.0 - 1.0 / z_min) - safe_pan_amp_x - micro_amp)
         max_offset_y = max(0.0, 0.5 * (1.0 - 1.0 / z_min) - safe_pan_amp_y - micro_amp)
 
-        original_cx = cx_offset
-        original_cy = cy_offset
-        cx_offset = max(-max_offset_x, min(max_offset_x, cx_offset))
-        cy_offset = max(-max_offset_y, min(max_offset_y, cy_offset))
+        clamped_cx = max(-max_offset_x, min(max_offset_x, cx_offset_raw))
+        clamped_cy = max(-max_offset_y, min(max_offset_y, cy_offset_raw))
 
-        offset_clamped = (abs(cx_offset - original_cx) > 0.001
-                          or abs(cy_offset - original_cy) > 0.001)
+        # === 非對稱偏向：頭部貼邊時讓 viewport 往自由側微偏 ===
+        # leftover = raw 超出 overscan 鉗制的部分，代表頭部靠邊的程度。
+        # bias 方向 = -sign(leftover)（朝自由側），
+        # 幅度 = min(|clamped|/2, |leftover|/4) 雙重限制，
+        # 確保最終 offset 不會翻到反面、也不會突破 overscan 邊界。
+        leftover_x = cx_offset_raw - clamped_cx
+        leftover_y = cy_offset_raw - clamped_cy
+
+        def _free_side_bias(clamped: float, leftover: float) -> float:
+            if abs(leftover) < 1e-6:
+                return 0.0
+            direction = -1.0 if leftover > 0 else 1.0
+            magnitude = min(abs(clamped) / 2.0, abs(leftover) / 4.0)
+            return direction * magnitude
+
+        bias_x = _free_side_bias(clamped_cx, leftover_x)
+        bias_y = _free_side_bias(clamped_cy, leftover_y)
+
+        cx_offset = max(-max_offset_x, min(max_offset_x, clamped_cx + bias_x))
+        cy_offset = max(-max_offset_y, min(max_offset_y, clamped_cy + bias_y))
+
+        offset_clamped = (abs(leftover_x) > 0.001 or abs(leftover_y) > 0.001)
 
         logger.info(
-            f"臉部安全參數: offset=({cx_offset:.3f}, {cy_offset:.3f})"
-            f"{' [鉗制]' if offset_clamped else ''}"
-            f" ← 原始({original_cx:.3f}, {original_cy:.3f}), "
+            f"頭部安全參數: offset=({cx_offset:.3f}, {cy_offset:.3f})"
+            f"{' [鉗制+自由側偏向]' if offset_clamped else ''}"
+            f" ← 原始({cx_offset_raw:.3f}, {cy_offset_raw:.3f}), "
             f"pan_amp=({safe_pan_amp_x:.4f}, {safe_pan_amp_y:.4f}) "
-            f"← 原始({default_pan_amp_x:.4f}, {default_pan_amp_y:.4f}), "
-            f"z=[{z_min:.3f}, {z_max:.3f}], max_offset=({max_offset_x:.4f}, {max_offset_y:.4f})"
+            f"← 預設({default_pan_amp_x:.4f}, {default_pan_amp_y:.4f}), "
+            f"z=[{z_min:.3f}, {z_max:.3f}], max_offset=({max_offset_x:.4f}, {max_offset_y:.4f}), "
+            f"bias=({bias_x:+.4f}, {bias_y:+.4f})"
         )
 
         return {
