@@ -466,7 +466,7 @@ class TestComputeFaceSafeParams:
         }]
 
     def test_center_face_no_clamp(self):
-        """臉部在中心時，offset 應為 ~0，不鉗制"""
+        """臉部在中心時，cx_offset ~0；cy_offset 略負（head_cy = face_cy - 0.2×fh 頭髮修正）"""
         regions = self._make_face_region(0.5, 0.5)
         result = KenBurnsService.compute_face_safe_params(
             subject_regions=regions,
@@ -475,7 +475,13 @@ class TestComputeFaceSafeParams:
         )
         assert result is not None
         assert abs(result["cx_offset"]) < 0.01
-        assert abs(result["cy_offset"]) < 0.01
+        # head_cy = 0.5 - 0.04 = 0.46 → cy_offset_raw = -0.04
+        # 新算法會在可行範圍內逼近，但不超過 |raw|
+        assert -0.05 <= result["cy_offset"] <= 0.0
+        # 新欄位存在
+        assert "pan_bias_x" in result
+        assert "pan_bias_y" in result
+        assert "zoom_amp_cap" in result
 
     def test_edge_face_offset_clamped(self):
         """臉部在邊緣時，offset 應被鉗制到安全範圍"""
@@ -518,9 +524,8 @@ class TestComputeFaceSafeParams:
         assert result["cy_offset"] < 0.4
 
     def test_offset_clamped_within_boundary(self):
-        """offset 應被鉗制到安全範圍（pan_amp 最低限 0.01 可能略超邊界，屬預期行為）"""
+        """offset + pan + DC bias 在 viewport 邊界內，不會超出 image"""
         base_zoom = 1.15
-        micro_amp = 0.002
 
         for cx in [0.1, 0.3, 0.5, 0.7, 0.9]:
             regions = self._make_face_region(cx, 0.5)
@@ -531,13 +536,22 @@ class TestComputeFaceSafeParams:
             )
             if result is None:
                 continue
-            z_min = max(1.0, base_zoom - 0.28 / 2.0)
-            max_offset = max(0.0,
-                             0.5 * (1.0 - 1.0 / z_min)
-                             - result["safe_pan_amp_x"] - micro_amp)
-            # offset 本身必須在鉗制範圍內
-            assert abs(result["cx_offset"]) <= max_offset + 0.001, (
-                f"cx={cx}: |offset|={abs(result['cx_offset']):.4f} > max={max_offset:.4f}"
+            # 用實際套用的 zoom_amp_cap 計算 z_min
+            eff_amp = result["zoom_amp_cap"]
+            z_min = max(1.0, base_zoom - eff_amp / 2.0)
+            half_over_zmin = 0.5 * (1.0 - 1.0 / z_min)
+
+            # 極端 pan 產生的最大位移量：a*(1+|bias|)/z_min
+            bias = result["pan_bias_x"]
+            a = result["safe_pan_amp_x"]
+            max_pan_contrib_neg = a * (1.0 + abs(bias)) / z_min
+            offset = result["cx_offset"]
+
+            # viewport_top at z_min 最小值 = half_over_zmin + offset - max_pan_contrib_neg
+            vp_top_min = half_over_zmin + offset - max_pan_contrib_neg
+            # 允許 0.005 誤差（pan_amp 最低 0.005 下限造成）
+            assert vp_top_min >= -0.01, (
+                f"cx={cx}: vp_top_min={vp_top_min:.4f} 越過 image 邊界"
             )
 
     def test_large_zoom_amp_tight_offset(self):

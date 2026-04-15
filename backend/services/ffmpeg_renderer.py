@@ -348,17 +348,27 @@ class FFmpegRenderer:
         pan_amp_x = rng.uniform(0.02, 0.10) * clamped_ratio    # 水平（提高上限，配合 overscan 更大空間）
         pan_amp_y = rng.uniform(0.015, 0.07) * clamped_ratio    # 垂直（提高上限，配合 overscan 更大空間）
 
-        # === 臉部保護：鉗制平移振幅到安全範圍 ===
+        # === 臉部保護：鉗制平移振幅 + 自適應 zoom + 非對稱 pan bias ===
         cx_offset = 0.0
         cy_offset = 0.0
+        pan_bias_x = 0.0
+        pan_bias_y = 0.0
         if face_params:
             cx_offset = face_params["cx_offset"]
             cy_offset = face_params["cy_offset"]
             pan_amp_x = min(pan_amp_x, face_params["safe_pan_amp_x"])
             pan_amp_y = min(pan_amp_y, face_params["safe_pan_amp_y"])
+            pan_bias_x = face_params.get("pan_bias_x", 0.0)
+            pan_bias_y = face_params.get("pan_bias_y", 0.0)
+            # 自適應 zoom_amp 上限：頭部靠邊時壓小縮放幅度，確保可行域存在
+            zoom_amp_cap = face_params.get("zoom_amp_cap")
+            if zoom_amp_cap is not None and zoom_amp_cap < zoom_amp:
+                zoom_amp = zoom_amp_cap
             logger.debug(
                 f"臉部保護啟用: offset=({cx_offset:.3f}, {cy_offset:.3f}), "
-                f"clamped_amp=({pan_amp_x:.4f}, {pan_amp_y:.4f})"
+                f"pan_amp=({pan_amp_x:.4f}, {pan_amp_y:.4f}), "
+                f"pan_bias=({pan_bias_x:+.3f}, {pan_bias_y:+.3f}), "
+                f"zoom_amp={zoom_amp:.4f}"
             )
 
         # === 微動參數 ===
@@ -442,13 +452,6 @@ class FFmpegRenderer:
             f"+0.15*sin({fx3:.8f}*{on_var}+{p3:.4f})"
             f"+0.1*sin({fx4:.8f}*{on_var}+{p4:.4f})"
         )
-        x_offset_term = f"+iw*{cx_offset:.6f}" if abs(cx_offset) > 0.001 else ""
-        x_target = (
-            f"(iw-iw/zoom)/2"
-            f"{x_offset_term}"
-            f"+iw/zoom*({pan_amp_x:.4f}*({x_pan})"
-            f"+{micro_amp}*sin({mf_x}*{on_var}+{mp_x:.4f}))"
-        )
 
         # --- y: 垂直平移表達式 ---
         # 用 cos 而非 sin → X/Y 構成橢圓軌跡（非直線往復）
@@ -458,6 +461,36 @@ class FFmpegRenderer:
             f"+0.15*cos({fy3:.8f}*{on_var}+{p3:.4f})"
             f"+0.1*cos({fy4:.8f}*{on_var}+{p4:.4f})"
         )
+
+        # === 非對稱 pan bias (DC shift) ===
+        # 頭部靠邊時，compute_face_safe_params 會算出 pan_bias 讓
+        # y_pan / x_pan 範圍偏向「安全側」。bias > 0 壓縮正向、擴展負向。
+        # 配合前面已鉗制的 safe_pan_amp 確保不會踩過 image 邊界。
+        if abs(pan_bias_x) > 1e-4:
+            x_pan = f"({x_pan}-{pan_bias_x:.6f})"
+        if abs(pan_bias_y) > 1e-4:
+            y_pan = f"({y_pan}-{pan_bias_y:.6f})"
+
+        # === 起始幀緩降：讓 t=0 的 pan 貢獻為 0 ===
+        # 問題：4 層 cos 疊加在 on=0 時 y_pan(0)≈0.39（非 0），會把 viewport
+        # 往下推 ~1.9%×ih，若主體（頭部）靠近圖片上緣就會貼緊或裁切。
+        # 對策：在第一段（frame_phase_offset==0）對 pan 乘上 2 秒餘弦緩降，
+        # 起始幀呈現純靜止位置（僅 overscan），2 秒內平滑過渡到完整運鏡振幅。
+        # 後續 pseudo-segments 不套用（保持連續運動）。
+        if frame_phase_offset == 0:
+            ramp_frames = max(int(2 * self.fps), 1)
+            ramp_expr = f"((1-cos(PI*min(1,{on_var}/{ramp_frames})))/2)"
+            x_pan = f"({x_pan})*{ramp_expr}"
+            y_pan = f"({y_pan})*{ramp_expr}"
+
+        x_offset_term = f"+iw*{cx_offset:.6f}" if abs(cx_offset) > 0.001 else ""
+        x_target = (
+            f"(iw-iw/zoom)/2"
+            f"{x_offset_term}"
+            f"+iw/zoom*({pan_amp_x:.4f}*({x_pan})"
+            f"+{micro_amp}*sin({mf_x}*{on_var}+{mp_x:.4f}))"
+        )
+
         y_offset_term = f"+ih*{cy_offset:.6f}" if abs(cy_offset) > 0.001 else ""
         y_target = (
             f"(ih-ih/zoom)/2"

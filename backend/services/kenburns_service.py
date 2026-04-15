@@ -465,124 +465,184 @@ class KenBurnsService:
         default_pan_amp_y: float,
         zoom_amp: float,
         margin: float = 0.01,
+        safe_gap: float = 0.025,
+        base_zoom: float = 1.15,
     ) -> Optional[Dict]:
         """
-        根據臉部偵測結果計算安全的平移參數（保護 80% 頭部範圍）
+        計算臉部安全參數（自適應 zoom_amp + 非對稱 pan bias）
 
-        數學原理：
-        1. 頭部估算：以臉框為基礎估算頭部輪廓（頭髮讓中心上移 0.2×fh，
-           尺寸放大為寬 1.15×、高 1.4×），保護其中 80% 範圍
-        2. 中心偏移：將平移基準偏移到頭部中心
-        3. 安全振幅鉗制：確保最大縮放+最大平移時，頭部仍完全在 viewport 內
-        4. 非對稱自由側偏向：頭部貼邊時，viewport 朝反方向微偏，
-           讓鏡頭運動有更多空間延伸向畫面的自由區域
+        核心策略：
+        1. 頭部估算：臉框外推 80% 頭部輪廓（含頭髮，寬 1.15×、高 1.4×）
+        2. 自適應 zoom_amp：若頭部 + 2×safe_gap 無法塞進 z_max viewport，
+           或 cy_offset 無可行解，縮小 zoom_amp 至可行上限
+        3. 求 cx/cy offset 可行範圍，clamp 至最接近 raw 值
+        4. 非對稱 pan bias：頭部靠上緣時壓縮正向 pan（viewport 往下 = 頭部朝上）
+           解析解：a*(1-b) <= pos_budget, a*(1+b) <= neg_budget
+                  a = (pos+neg)/2, b = (neg-pos)/(pos+neg)
 
         Args:
-            subject_regions: 偵測結果列表（由 face_detection_service 產出）
-            default_pan_amp_x: 預設水平平移振幅
-            default_pan_amp_y: 預設垂直平移振幅
-            zoom_amp: 縮放振幅（build_zoompan_expr 計算出的值）
-            margin: 額外安全邊距（佔畫面比例）
+            subject_regions: 偵測結果（由 face_detection_service 產出）
+            default_pan_amp_x / default_pan_amp_y: 預設平移振幅
+            zoom_amp: 預估縮放振幅（通常 0.28×BPM比，作為上限輸入）
+            margin: 歷史相容參數（不再使用，由 safe_gap 取代）
+            safe_gap: 頭部與 viewport 邊緣的安全距離（圖片比例，預設 2.5%）
+            base_zoom: Overscan 基礎縮放（需與 ffmpeg_renderer 一致）
 
         Returns:
-            None（無臉部）或 dict:
-            {
-                "cx_offset": float,      # 水平中心偏移（-0.5 ~ 0.5）
-                "cy_offset": float,      # 垂直中心偏移（-0.5 ~ 0.5）
-                "safe_pan_amp_x": float,  # 安全水平振幅
-                "safe_pan_amp_y": float,  # 安全垂直振幅
-                "has_face": True,
-            }
+            None（無臉部）或 dict，含：
+            cx_offset, cy_offset, safe_pan_amp_x, safe_pan_amp_y,
+            pan_bias_x, pan_bias_y, zoom_amp_cap, has_face
         """
         if not subject_regions:
             return None
 
-        # 取信心最高的臉部
         faces = [r for r in subject_regions if r.get("type") == "face"]
         if not faces:
             return None
 
-        best = faces[0]  # 已按 confidence 排序
+        best = faces[0]
         bounds = best["bounds"]
         fx = bounds["x"]
         fy = bounds["y"]
         fw = bounds["width"]
         fh = bounds["height"]
 
-        # === 頭部估算（動漫角色：頭髮讓頭部中心位於臉框中心上方 ~0.2×fh）===
-        # 頭部輪廓 ≈ 臉框 × (1.15 寬, 1.4 高)。
-        # 本系統保護 80% 頭部範圍：head_half = 臉框半軸 × 比例係數 × 0.8
+        # === 頭部估算 ===
         face_cx = fx + fw / 2
         head_cy = (fy + fh / 2) - 0.2 * fh
 
-        # 中心偏移量（相對於影像中心 0.5）
+        head_half_x = fw / 2 * 1.15 * 0.8
+        head_half_y = fh / 2 * 1.40 * 0.8
+
+        head_top = max(0.0, head_cy - head_half_y)
+        head_bot = min(1.0, head_cy + head_half_y)
+        head_left = max(0.0, face_cx - head_half_x)
+        head_right = min(1.0, face_cx + head_half_x)
+
         cx_offset_raw = face_cx - 0.5
         cy_offset_raw = head_cy - 0.5
 
-        # 80% 頭部保護半徑
-        head_half_x = fw / 2 * 1.15 * 0.8   # ≈ 0.46 × fw
-        head_half_y = fh / 2 * 1.40 * 0.8   # ≈ 0.56 × fh
+        # === 自適應 zoom_amp：迭代求可行 cap,同時保留 min_pan_budget ===
+        # 可行且有感 pan 的約束（推導見設計筆記）：
+        #   0.5*zoom_amp/(z_min*z_max) + min_pan*(1/z_min + 1/z_max) <= edge - safe_gap
+        # LHS 第一項為 overscan 不均衡補償,第二項為左右兩側各自保留 min_pan 空間
+        edge_y_budget = min(head_top, 1.0 - head_bot) - safe_gap
+        edge_x_budget = min(head_left, 1.0 - head_right) - safe_gap
+        min_pan_budget = 0.008   # 0.8% 圖片大小 = 約 8px@1080
 
-        # 安全振幅鉗制：
-        # viewport 半寬 = 0.5 / z_max（z_max 時 viewport 最小）
-        # 最大平移時，頭部邊緣必須在 viewport 內
-        # max_safe_pan = viewport_half - head_half - margin - |offset|
-        # 雙向縮放模式：base_zoom=1.15, z_max = base_zoom + amp/2
-        base_zoom = 1.15
-        z_max = base_zoom + zoom_amp / 2.0
-        vp_half_x = 0.5 / z_max
-        vp_half_y = 0.5 / z_max
-
-        max_safe_x = vp_half_x - head_half_x - margin - abs(cx_offset_raw)
-        max_safe_y = vp_half_y - head_half_y - margin - abs(cy_offset_raw)
-
-        # 鉗制到最小值 0.01（保證最低限度的平移動感）
-        safe_pan_amp_x = min(default_pan_amp_x, max(0.01, max_safe_x))
-        safe_pan_amp_y = min(default_pan_amp_y, max(0.01, max_safe_y))
-
-        # === Overscan 邊界保護：鉗制 offset 到安全範圍 ===
-        # 在 z_min（zoom out 到最大 viewport）時，offset + pan + micro 不能超出圖片邊界
-        # 安全上限 = 0.5 × (1 - 1/z_min) - safe_pan_amp - micro_amp
-        # z_min = base_zoom - amp/2（雙向縮放的最小值）
-        z_min = max(1.0, base_zoom - zoom_amp / 2.0)
-        micro_amp = 0.002  # 與 ffmpeg_renderer.py 中的 micro_amp 一致
-        max_offset_x = max(0.0, 0.5 * (1.0 - 1.0 / z_min) - safe_pan_amp_x - micro_amp)
-        max_offset_y = max(0.0, 0.5 * (1.0 - 1.0 / z_min) - safe_pan_amp_y - micro_amp)
-
-        clamped_cx = max(-max_offset_x, min(max_offset_x, cx_offset_raw))
-        clamped_cy = max(-max_offset_y, min(max_offset_y, cy_offset_raw))
-
-        # === 非對稱偏向：頭部貼邊時讓 viewport 往自由側微偏 ===
-        # leftover = raw 超出 overscan 鉗制的部分，代表頭部靠邊的程度。
-        # bias 方向 = -sign(leftover)（朝自由側），
-        # 幅度 = min(|clamped|/2, |leftover|/4) 雙重限制，
-        # 確保最終 offset 不會翻到反面、也不會突破 overscan 邊界。
-        leftover_x = cx_offset_raw - clamped_cx
-        leftover_y = cy_offset_raw - clamped_cy
-
-        def _free_side_bias(clamped: float, leftover: float) -> float:
-            if abs(leftover) < 1e-6:
+        def _solve_zoom_cap(edge_budget: float) -> float:
+            if edge_budget <= 0:
                 return 0.0
-            direction = -1.0 if leftover > 0 else 1.0
-            magnitude = min(abs(clamped) / 2.0, abs(leftover) / 4.0)
-            return direction * magnitude
+            cap = zoom_amp
+            for _ in range(15):
+                zmn = max(1.0, base_zoom - cap / 2.0)
+                zmx = base_zoom + cap / 2.0
+                required = 0.5 * cap / (zmn * zmx) + min_pan_budget * (1.0 / zmn + 1.0 / zmx)
+                if required <= edge_budget + 1e-9:
+                    break
+                # 依比例收縮（留 5% 餘裕避免來回跳）
+                cap *= 0.95 * edge_budget / required
+            return max(0.0, cap)
 
-        bias_x = _free_side_bias(clamped_cx, leftover_x)
-        bias_y = _free_side_bias(clamped_cy, leftover_y)
+        zoom_cap_y = _solve_zoom_cap(edge_y_budget)
+        zoom_cap_x = _solve_zoom_cap(edge_x_budget)
+        zoom_amp_cap = max(0.0, min(zoom_amp, zoom_cap_x, zoom_cap_y))
 
-        cx_offset = max(-max_offset_x, min(max_offset_x, clamped_cx + bias_x))
-        cy_offset = max(-max_offset_y, min(max_offset_y, clamped_cy + bias_y))
+        z_max = base_zoom + zoom_amp_cap / 2.0
+        z_min = max(1.0, base_zoom - zoom_amp_cap / 2.0)
 
-        offset_clamped = (abs(leftover_x) > 0.001 or abs(leftover_y) > 0.001)
+        half_over_zmax = 0.5 * (1.0 - 1.0 / z_max)
+        half_over_zmin = 0.5 * (1.0 - 1.0 / z_min)
+        half_vp_zmax = 0.5 * (1.0 + 1.0 / z_max)
+
+        def _solve_axis(
+            head_lo: float,
+            head_hi: float,
+            offset_raw: float,
+            default_amp: float,
+        ) -> Tuple[float, float, float]:
+            """求解單軸 (offset, pan_amp, pan_bias)
+
+            當 offset_raw 在可行範圍內 → 用 raw(最佳臉部居中)
+            當 offset_raw 超出範圍 → 取平衡 offset(L_top = R_top 使 pan budget 最大)
+            """
+            cy_upper = min(head_lo - safe_gap - half_over_zmax, half_over_zmin)
+            cy_lower = max(-half_over_zmin, head_hi + safe_gap - half_vp_zmax)
+
+            if cy_upper < cy_lower:
+                # 不可行：退回 black-border 限制內的 raw 鉗制,pan 幾乎為零
+                fallback = max(-half_over_zmin, min(half_over_zmin, offset_raw))
+                return (fallback, 0.0, 0.0)
+
+            def _budget_at(c: float) -> Tuple[float, float]:
+                """給定 offset c,回傳 (max_pos, max_neg) 合法 pan 振幅預算"""
+                r_top = max(0.0, head_lo - safe_gap - c - half_over_zmax)
+                l_bot_black = max(0.0, half_over_zmin - c)
+                l_top = max(0.0, c + half_over_zmin)
+                r_bot = max(0.0, half_vp_zmax + c - head_hi - safe_gap)
+                pos = min(r_top * z_max, l_bot_black * z_min)
+                neg = min(l_top * z_min, r_bot * z_max)
+                return (max(0.0, pos), max(0.0, neg))
+
+            # 候選 offset:raw、0、head-top/bot 平衡、中點
+            candidates = [
+                offset_raw,
+                0.0,
+                0.5 * (head_lo - safe_gap - half_over_zmax - half_over_zmin),
+                0.5 * (head_hi + safe_gap + half_over_zmin - half_vp_zmax),
+                0.5 * (cy_lower + cy_upper),
+            ]
+            best_offset = None
+            best_score = -1.0
+            for c in candidates:
+                c_clamped = max(cy_lower, min(cy_upper, c))
+                pos, neg = _budget_at(c_clamped)
+                # 分數:雙向都有空間時強烈獎勵(×4 mineral),單向只拿 max*1
+                # 這讓對稱 pan 勝過單邊 endpoint,避免無謂地進入 bias=±0.9 的極端區
+                if pos > 1e-6 and neg > 1e-6:
+                    score = 4.0 * min(pos, neg)
+                else:
+                    score = max(pos, neg)
+                # 輕微獎勵接近 raw 的 offset (|Δ| 越小獎勵越多)
+                score -= 0.005 * abs(c_clamped - offset_raw)
+                if score > best_score:
+                    best_score = score
+                    best_offset = c_clamped
+
+            offset = best_offset if best_offset is not None else max(
+                cy_lower, min(cy_upper, offset_raw)
+            )
+            max_pos, max_neg = _budget_at(offset)
+
+            total = max_pos + max_neg
+            if total < 1e-6:
+                return (offset, 0.0, 0.0)
+
+            bias = (max_neg - max_pos) / total
+            bias = max(-0.9, min(0.9, bias))
+
+            a_lim_pos = max_pos / max(1e-6, 1.0 - bias) if max_pos > 0 else float("inf")
+            a_lim_neg = max_neg / max(1e-6, 1.0 + bias) if max_neg > 0 else float("inf")
+            a_max = min(a_lim_pos, a_lim_neg)
+
+            # 不對 a_max 加人工下限 —— 保持嚴格幾何約束
+            safe_amp = min(default_amp, max(0.0, a_max))
+            return (offset, safe_amp, bias)
+
+        cy_offset, safe_pan_amp_y, pan_bias_y = _solve_axis(
+            head_top, head_bot, cy_offset_raw, default_pan_amp_y
+        )
+        cx_offset, safe_pan_amp_x, pan_bias_x = _solve_axis(
+            head_left, head_right, cx_offset_raw, default_pan_amp_x
+        )
 
         logger.info(
-            f"頭部安全參數: offset=({cx_offset:.3f}, {cy_offset:.3f})"
-            f"{' [鉗制+自由側偏向]' if offset_clamped else ''}"
-            f" ← 原始({cx_offset_raw:.3f}, {cy_offset_raw:.3f}), "
-            f"pan_amp=({safe_pan_amp_x:.4f}, {safe_pan_amp_y:.4f}) "
-            f"← 預設({default_pan_amp_x:.4f}, {default_pan_amp_y:.4f}), "
-            f"z=[{z_min:.3f}, {z_max:.3f}], max_offset=({max_offset_x:.4f}, {max_offset_y:.4f}), "
-            f"bias=({bias_x:+.4f}, {bias_y:+.4f})"
+            f"臉部安全參數: offset=({cx_offset:+.4f}, {cy_offset:+.4f}), "
+            f"pan_amp=({safe_pan_amp_x:.4f}, {safe_pan_amp_y:.4f}), "
+            f"pan_bias=({pan_bias_x:+.3f}, {pan_bias_y:+.3f}), "
+            f"zoom_cap={zoom_amp_cap:.4f}(原{zoom_amp:.4f}), "
+            f"z=[{z_min:.3f},{z_max:.3f}], "
+            f"head=[T={head_top:.3f} B={head_bot:.3f} L={head_left:.3f} R={head_right:.3f}]"
         )
 
         return {
@@ -590,6 +650,9 @@ class KenBurnsService:
             "cy_offset": cy_offset,
             "safe_pan_amp_x": safe_pan_amp_x,
             "safe_pan_amp_y": safe_pan_amp_y,
+            "pan_bias_x": pan_bias_x,
+            "pan_bias_y": pan_bias_y,
+            "zoom_amp_cap": zoom_amp_cap,
             "has_face": True,
         }
 
