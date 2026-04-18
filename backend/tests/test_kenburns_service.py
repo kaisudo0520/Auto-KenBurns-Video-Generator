@@ -525,14 +525,14 @@ class TestComputeFaceSafeParams:
 
     def test_offset_clamped_within_boundary(self):
         """offset + pan + DC bias 在 viewport 邊界內，不會超出 image"""
-        base_zoom = 1.15
+        base_zoom = 1.10
 
         for cx in [0.1, 0.3, 0.5, 0.7, 0.9]:
             regions = self._make_face_region(cx, 0.5)
             result = KenBurnsService.compute_face_safe_params(
                 subject_regions=regions,
-                default_pan_amp_x=0.10, default_pan_amp_y=0.07,
-                zoom_amp=0.28,
+                default_pan_amp_x=0.065, default_pan_amp_y=0.045,
+                zoom_amp=0.18,
             )
             if result is None:
                 continue
@@ -559,8 +559,8 @@ class TestComputeFaceSafeParams:
         regions = self._make_face_region(0.8, 0.5)
         result = KenBurnsService.compute_face_safe_params(
             subject_regions=regions,
-            default_pan_amp_x=0.10, default_pan_amp_y=0.07,
-            zoom_amp=0.28,  # z_min = 1.15 - 0.14 = 1.01
+            default_pan_amp_x=0.065, default_pan_amp_y=0.045,
+            zoom_amp=0.18,  # z_min = 1.10 - 0.09 = 1.01
         )
         assert result is not None
         # z_min ≈ 1.01，overscan 裕度極小，offset 應被大幅鉗制

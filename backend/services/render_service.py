@@ -327,13 +327,13 @@ class RenderService:
             from backend.services.kenburns_service import KenBurnsService
 
             # 用最大值估算（確保最大縮放時臉部仍受保護）
-            # build_zoompan_expr 實際範圍: zoom=[0.10,0.28], x=[0.02,0.10], y=[0.015,0.07]
+            # build_zoompan_expr 實際範圍: zoom=[0.06,0.18], x=[0.015,0.065], y=[0.010,0.045]
             # 雙向縮放：z = base_zoom ± amp/2，傳入完整 amp 供 face_safe 計算 z_max
             ref_bpm = bpm
             ref_ratio = max(0.5, min(ref_bpm / 160.0, 1.5))
-            ref_zoom_amp = 0.28 * ref_ratio    # 最大值（保守估算，避免臉部被切到）
-            ref_pan_x = 0.10 * ref_ratio       # 最大值
-            ref_pan_y = 0.07 * ref_ratio       # 最大值
+            ref_zoom_amp = 0.18 * ref_ratio    # 最大值（保守估算，避免臉部被切到）
+            ref_pan_x = 0.065 * ref_ratio      # 最大值
+            ref_pan_y = 0.045 * ref_ratio      # 最大值
 
             face_params_list = []
             for regions in face_regions_list:

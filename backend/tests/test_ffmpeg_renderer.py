@@ -302,9 +302,9 @@ class TestBuildZoompanExpr:
         assert isinstance(rot_info, dict)
 
     def test_z_expr_uses_base_zoom(self):
-        """縮放表達式應以 base_zoom (1.15) 開頭（雙向縮放基準點）"""
+        """縮放表達式應以 base_zoom (1.10) 開頭（雙向縮放基準點）"""
         z, _, _, _ = self.renderer.build_zoompan_expr(bpm=120.0, total_frames=900)
-        assert z.startswith("1.1500+")
+        assert z.startswith("1.1000+")
         # 雙向縮放：表達式包含 -0.5 偏移
         assert "-0.5)" in z
 
@@ -471,15 +471,15 @@ class TestRotationExpr:
         assert "rotation_amp_deg" in rot_info
 
     def test_rotation_angle_in_range(self):
-        """rotation_amp_deg 應在 8~15° × clamped_ratio 範圍內"""
+        """rotation_amp_deg 應在 4~9° × clamped_ratio 範圍內"""
         # BPM=120 → ratio=120/160=0.75
         _, _, _, rot_info = self.renderer.build_zoompan_expr(bpm=120.0, total_frames=900)
         amp = rot_info["rotation_amp_deg"]
         ratio = max(0.5, min(120.0 / 160.0, 1.5))
-        assert 8.0 * ratio <= amp <= 15.0 * ratio
+        assert 4.0 * ratio <= amp <= 9.0 * ratio
 
     def test_rotation_angle_in_range_high_bpm(self):
-        """高 BPM 時旋轉振幅仍在 [8*ratio, 15*ratio] 安全範圍
+        """高 BPM 時旋轉振幅仍在 [4*ratio, 9*ratio] 安全範圍
 
         clamped_ratio = clamp(bpm/160, 0.5, 1.5)。
         BPM 240 對應 ratio = 1.5（觸發 clamp 上限），
@@ -489,7 +489,7 @@ class TestRotationExpr:
             _, _, _, rot_info = self.renderer.build_zoompan_expr(bpm=bpm, total_frames=900)
             amp = rot_info["rotation_amp_deg"]
             ratio = max(0.5, min(bpm / 160.0, 1.5))
-            assert 8.0 * ratio <= amp <= 15.0 * ratio, (
+            assert 4.0 * ratio <= amp <= 9.0 * ratio, (
                 f"BPM={bpm}, ratio={ratio}, amp={amp} 超出範圍"
             )
 
@@ -510,12 +510,12 @@ class TestRotationExpr:
         assert 0.0 < amp_rad < 0.5
 
     def test_build_rotation_expr_period(self):
-        """旋轉週期應為 10/φ 小節（與 zoom 10 小節不可公約）"""
+        """旋轉週期應為 13/φ 小節（與 zoom 13 小節不可公約）"""
         import math
         phi = 1.618033988749895
         bpm = 120.0
         bar_duration = 240.0 / bpm
-        expected_period_frames = (10.0 / phi) * bar_duration * 30  # fps=30
+        expected_period_frames = (13.0 / phi) * bar_duration * 30  # fps=30
 
         # 驗證表達式中的頻率
         expr = self.renderer.build_rotation_expr(bpm, 10.0, cycle_offset=0)

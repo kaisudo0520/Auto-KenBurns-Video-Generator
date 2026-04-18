@@ -176,7 +176,7 @@ class FFmpegRenderer:
         使用 BPM 同步的正弦擺動：
         angle = amp_rad * sin(2π / period_frames * n + phase)
 
-        週期 = 10/φ 小節 ≈ 6.18 小節（與 zoom 10 小節黃金比例偏移，永不同步）
+        週期 = 13/φ 小節 ≈ 8.03 小節（與 zoom 13 小節黃金比例偏移，永不同步）
 
         Args:
             bpm: 音樂 BPM
@@ -192,8 +192,8 @@ class FFmpegRenderer:
         phi = 1.618033988749895
         bar_duration = 240.0 / bpm
 
-        # 旋轉週期 = 10/φ 小節 ≈ 6.18 小節（與 zoom 10 小節不可公約）
-        rot_period_bars = 10.0 / phi
+        # 旋轉週期 = 13/φ 小節 ≈ 8.03 小節（與 zoom 13 小節不可公約）
+        rot_period_bars = 13.0 / phi
         rot_period_frames = rot_period_bars * bar_duration * self.fps
 
         # 旋轉頻率
@@ -264,7 +264,7 @@ class FFmpegRenderer:
         根據 BPM 構建 XYZ 三軸統一運動的 zoompan 表達式 + 旋轉資訊
 
         設計理念（統一 3D 攝影機模型 + Overscan 雙向縮放）：
-        - base_zoom=1.15 讓圖片初始就只顯示 ~85%，多出 15% 為移動緩衝區
+        - base_zoom=1.10 讓圖片初始就只顯示 ~91%，多出 10% 為移動緩衝區
         - XYZ 三軸同時驅動，形成 3D Lissajous 軌跡
         - 雙向縮放：z = base_zoom ± amp/2（zoom in + zoom out）
         - 各軸振幅在範圍內隨機取值 → 每次渲染獨特
@@ -273,16 +273,16 @@ class FFmpegRenderer:
 
         === Z 軸（縮放/深度） ===
         雙向餘弦 + smootherstep 包絡：
-        - 週期 = 10 小節，振幅隨機 [0.10, 0.28] × BPM比率
+        - 週期 = 13 小節，振幅隨機 [0.06, 0.18] × BPM比率
         - z = base_zoom + amp × (smootherstep - 0.5) → 雙向縮放
         - 安全約束：z_min >= 1.0（不會 zoom out 到露出黑邊）
 
         === XY 軸（水平/垂直平移） ===
         4 層黃金比例頻率正弦疊加：
-        - X 基頻 = 2.5 小節，Y 基頻 = 2.648 小節（微偏差，橢圓緩慢旋轉）
+        - X 基頻 = 3.25 小節，Y 基頻 ≈ 3.442 小節（微偏差，橢圓緩慢旋轉）
         - 權重 50% / 25% / 15% / 10%
         - 第 4 層高頻微擾增加軌跡突發方向變化
-        - 振幅隨機 X:[0.02, 0.10] Y:[0.015, 0.07] × BPM比率
+        - 振幅隨機 X:[0.015, 0.065] Y:[0.010, 0.045] × BPM比率
         - X 用 sin、Y 用 cos → 橢圓軌跡（因基頻微偏差，橢圓會緩慢旋轉）
 
         === 微動 ===
@@ -325,28 +325,29 @@ class FFmpegRenderer:
         bar_duration = 240.0 / bpm
 
         # === Overscan 基礎縮放（雙向縮放的基準點）===
-        # base_zoom > 1.0 讓圖片在「靜止狀態」就只顯示 ~85%，
-        # 多出的 15% 成為移動緩衝區，允許 zoom out + zoom in + 全程平移
-        base_zoom = 1.15
+        # base_zoom > 1.0 讓圖片在「靜止狀態」就只顯示 ~91%，
+        # 多出的 10% 成為移動緩衝區，允許 zoom out + zoom in + 全程平移
+        # 較小的 overscan 讓畫面更完整，減少被切割的感覺
+        base_zoom = 1.10
 
         # === Z 軸（縮放）參數 ===
-        # 週期 = 10 小節（加快節奏，原 16 小節太慢）
-        zoom_period_frames = 10 * bar_duration * self.fps
+        # 週期 = 13 小節（放慢節奏，運鏡更從容）
+        zoom_period_frames = 13 * bar_duration * self.fps
         # 振幅隨機：每次渲染獨特的縮放強度（半振幅，雙向展開）
         # 實際 z 範圍 = [base_zoom - amp/2, base_zoom + amp/2]
-        # 安全約束：base_zoom - amp/2 >= 1.0 → amp <= 2*(base_zoom-1.0) = 0.30
-        zoom_amp = rng.uniform(0.10, 0.28) * clamped_ratio
+        # 安全約束：base_zoom - amp/2 >= 1.0 → amp <= 2*(base_zoom-1.0) = 0.20
+        zoom_amp = rng.uniform(0.06, 0.18) * clamped_ratio
 
         # === XY 軸（平移）參數 ===
-        # X 基頻週期 = 2.5 小節（加快平移節奏，原 4 小節太慢）
-        # Y 基頻週期 = φ³ × 0.625 ≈ 2.648 小節（保持微偏差，橢圓緩慢旋轉）
+        # X 基頻週期 = 3.25 小節（放慢平移節奏，減輕切割感）
+        # Y 基頻週期 = φ³ × 0.8125 ≈ 3.442 小節（保持微偏差，橢圓緩慢旋轉）
         phi = 1.618033988749895  # 黃金比例
-        pan_period_x_frames = 2.5 * bar_duration * self.fps
-        pan_period_y_frames = (phi ** 3) * 0.625 * bar_duration * self.fps
+        pan_period_x_frames = 3.25 * bar_duration * self.fps
+        pan_period_y_frames = (phi ** 3) * 0.8125 * bar_duration * self.fps
 
-        # 振幅隨機：擴大範圍讓路徑更有張力
-        pan_amp_x = rng.uniform(0.02, 0.10) * clamped_ratio    # 水平（提高上限，配合 overscan 更大空間）
-        pan_amp_y = rng.uniform(0.015, 0.07) * clamped_ratio    # 垂直（提高上限，配合 overscan 更大空間）
+        # 振幅隨機：縮小範圍讓畫面更完整，預留安全邊緣
+        pan_amp_x = rng.uniform(0.015, 0.065) * clamped_ratio    # 水平
+        pan_amp_y = rng.uniform(0.010, 0.045) * clamped_ratio    # 垂直
 
         # === 臉部保護：鉗制平移振幅 + 自適應 zoom + 非對稱 pan bias ===
         cx_offset = 0.0
@@ -514,8 +515,8 @@ class FFmpegRenderer:
             y_expr = y_target
 
         # === 旋轉參數 ===
-        # 旋轉振幅隨機：8~15° × BPM ratio
-        rotation_amp_deg = rng.uniform(8.0, 15.0) * clamped_ratio
+        # 旋轉振幅隨機：4~9° × BPM ratio（降低搖擺幅度，畫面更穩）
+        rotation_amp_deg = rng.uniform(4.0, 9.0) * clamped_ratio
         angle_expr = self.build_rotation_expr(
             bpm, rotation_amp_deg, cycle_offset,
             frame_phase_offset=frame_phase_offset,

@@ -466,7 +466,7 @@ class KenBurnsService:
         zoom_amp: float,
         margin: float = 0.01,
         safe_gap: float = 0.025,
-        base_zoom: float = 1.15,
+        base_zoom: float = 1.10,
     ) -> Optional[Dict]:
         """
         計算臉部安全參數（自適應 zoom_amp + 非對稱 pan bias）
@@ -483,7 +483,7 @@ class KenBurnsService:
         Args:
             subject_regions: 偵測結果（由 face_detection_service 產出）
             default_pan_amp_x / default_pan_amp_y: 預設平移振幅
-            zoom_amp: 預估縮放振幅（通常 0.28×BPM比，作為上限輸入）
+            zoom_amp: 預估縮放振幅（通常 0.18×BPM比，作為上限輸入）
             margin: 歷史相容參數（不再使用，由 safe_gap 取代）
             safe_gap: 頭部與 viewport 邊緣的安全距離（圖片比例，預設 2.5%）
             base_zoom: Overscan 基礎縮放（需與 ffmpeg_renderer 一致）
