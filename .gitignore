@@ -71,6 +71,13 @@ frontend/.output/
 .nuxt/
 .output/
 
+# 一鍵啟動器的執行期記錄（start.ps1 寫入、stop.ps1 讀取後刪除）
+scripts/.running-ports.json
+scripts/.running-ports.*.tmp
+
+# tsc -p tsconfig.node.json（composite）產生的增量建置資訊
+frontend/*.tsbuildinfo
+
 # Uploads and output
 uploads/
 output/

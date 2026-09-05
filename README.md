@@ -4,7 +4,7 @@
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-green?logo=fastapi)
 ![Vue 3](https://img.shields.io/badge/Vue-3+-42b883?logo=vue.js)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5+-3178c6?logo=typescript)
-![Tests](https://img.shields.io/badge/Tests-199%20passed-green)
+![Tests](https://img.shields.io/badge/Tests-205%20passed-green)
 ![Coverage](https://img.shields.io/badge/Coverage-80%25-yellow)
 
 ## 專案概述
@@ -63,6 +63,33 @@
 
 ### 安裝與啟動
 
+#### Windows 一鍵啟動（推薦）
+
+雙擊專案根目錄的 **`start.bat`** 即可：
+
+- 自動建立 `backend\venv`（需 Python 3.10 以上）並安裝依賴（首次執行）
+- 自動執行 `npm install`（首次執行）
+- 啟動任何服務之前先檢查兩個連接埠：被本專案的服務占用就沿用，被其他程式占用則報錯，不會啟動到一半留下孤兒程序
+- 以 **venv 內的 Python** 啟動後端（預設 port 8000）、以 Vite 啟動前端（預設 port 5173），各開一個命令視窗
+- 等待兩個服務就緒，並比對「直連後端」與「經前端 proxy」取得的 `/health` `instance_id` 確認前後端配對正確後，才自動開啟瀏覽器；任一失敗會清理本次啟動的程序並以錯誤結束
+
+要關閉服務請雙擊 **`stop.bat`**，它只會結束能從命令列辨識為本專案服務的程序，不會依連接埠盲殺。
+
+連接埠設定的優先順序：`start.bat` 為 命令列參數（例如 `start.bat -BackendPort 8010 -FrontendPort 5180`）、環境變數 `BACKEND_PORT` / `FRONTEND_PORT`、預設值；
+`stop.bat` 為 命令列參數、`scripts\.running-ports.json` 啟動記錄、環境變數、預設值（記錄是實際執行中服務的事實來源，與環境變數不同時會提示）。
+`start.bat` 成功後會把實際使用的埠寫到該記錄，`stop.bat` 不帶參數時會讀取它；只有成功停止該組服務時才會刪除記錄。
+若記錄中的服務仍在執行，改用不同的埠再次 `start.bat` 會被拒絕，請先 `stop.bat`。
+
+實際邏輯在 `scripts\start.ps1` / `scripts\stop.ps1`（共用 `scripts\_common.ps1`），BAT 只是薄殼。
+
+> 手動啟動時請注意：PowerShell 啟用 venv 要用 `.\backend\venv\Scripts\Activate.ps1`，
+> `source venv/Scripts/activate` 只適用於 Git Bash。若未正確啟用，`uvicorn` 可能解析到系統其他 Python
+> （例如 Anaconda）而缺少 `imgutils`，臉部偵測會靜默退回只認正面臉的 cascade。
+
+> 前端的 `/api`、`/ws`、`/uploads`、`/output` 在 `npm run dev` 與 `vite preview` 都經由 Vite proxy 轉發到後端；
+> 若將建置後的前端獨立部署（沒有 Vite proxy），需在執行 `vite build` **之前**設定 `VITE_API_URL` 與 `VITE_WS_URL`
+> 指向後端（Vite 會在建置時將其寫入產物，部署後再設定環境變數無效）。
+
 #### 1. 複製專案
 
 ```bash
@@ -77,9 +104,9 @@ cd backend
 
 # 建立虛擬環境（推薦）
 python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# 或
-venv\Scripts\activate     # Windows
+source venv/bin/activate          # Linux/Mac
+source venv/Scripts/activate      # Windows Git Bash
+.\venv\Scripts\Activate.ps1       # Windows PowerShell
 
 # 安裝依賴
 pip install -r requirements.txt
@@ -119,6 +146,9 @@ npm run dev
 ```
 
 前端網站：http://localhost:5173
+
+> `npm run preview`（預覽 `dist/` 建置結果）使用獨立的 port 4173（可用環境變數 `PREVIEW_PORT` 覆寫），
+> 與開發伺服器的 5173 分開，避免殘留的 preview 被一鍵啟動器當成可沿用的前端；preview 同樣經 proxy 連到後端。
 
 ### 生產環境部署
 
@@ -245,9 +275,9 @@ npm run test
 
 | 類別 | 數量 |
 |------|------|
-| 後端測試 | 181 |
+| 後端測試 | 187 |
 | 前端測試 | 18 |
-| **總計** | **199** |
+| **總計** | **205** |
 
 ## 專案結構
 

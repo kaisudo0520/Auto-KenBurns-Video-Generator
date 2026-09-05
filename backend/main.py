@@ -6,6 +6,7 @@ Main application configuration, middleware, and route registration.
 
 import logging
 import os
+import uuid
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -95,13 +96,31 @@ async def general_exception_handler(request: Request, exc: Exception) -> JSONRes
 
 
 # Health check endpoint
+def resolve_instance_id() -> str:
+    """
+    決定本後端服務的 instance_id。
+
+    一鍵啟動器（scripts/start.ps1）分別直連後端與經前端 proxy 讀取 /health，比對 instance_id
+    以確認前端 proxy 指向的是同一個後端。uvicorn --workers N 以 spawn 啟動多個 worker，
+    各自重新匯入本模組；若由外層以 KENBURNS_INSTANCE_ID 注入，所有 worker 會共用同一個識別，
+    否則每個 worker 各自產生（此時 /health 的 instance_id / pid 為「該 worker」的識別）。
+    """
+    injected = os.environ.get("KENBURNS_INSTANCE_ID", "").strip()
+    return injected if injected else uuid.uuid4().hex
+
+
+INSTANCE_ID = resolve_instance_id()
+
+
 @app.get("/health", tags=["Health"])
 async def health_check():
     """Health check endpoint."""
     return {
         "status": "healthy",
         "service": "Auto-KenBurns Video Generator",
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "instance_id": INSTANCE_ID,
+        "pid": os.getpid(),
     }
 
 

@@ -35,7 +35,11 @@ class WebSocketService {
   private baseUrl: string
 
   constructor() {
-    this.baseUrl = import.meta.env.VITE_WS_URL || (import.meta.env.VITE_API_URL?.replace('http', 'ws') || '').replace('/api/v1', '') || 'ws://localhost:8000'
+    // 預設走同源（經 Vite 的 /ws proxy 轉發到後端），與 HTTP API 一致；只有明確設定 VITE_WS_URL / VITE_API_URL 才直連
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    this.baseUrl = import.meta.env.VITE_WS_URL
+      || (import.meta.env.VITE_API_URL?.replace('http', 'ws') || '').replace('/api/v1', '')
+      || `${wsProtocol}//${window.location.host}`
   }
 
   connect(jobId: string): void {

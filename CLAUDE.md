@@ -35,6 +35,26 @@ Auto-KenBurns Video Generator - A web application that automatically generates K
 
 ## Running the Application
 
+### 一鍵啟動（Windows，推薦）
+
+專案根目錄 `start.bat` / `stop.bat`（純 ASCII 薄殼，邏輯在 `scripts/start.ps1`、`scripts/stop.ps1`，共用 `scripts/_common.ps1`）：
+
+- 流程：venv（必檢 Python >= 3.10、缺套件則裝 requirements）→ `npm install`（缺 node_modules 時）→ **啟動前檢查** → 啟動 → 等待就緒 + proxy 探測 → 寫記錄 → 開瀏覽器
+- 一律以 `backend\venv\Scripts\python.exe -m uvicorn backend.main:app --host 0.0.0.0` 啟動後端，不依賴 shell 是否已啟用 venv
+- 連接埠優先順序：start 為 參數 `-BackendPort/-FrontendPort`（0 或負數直接報錯，不退回）> 環境變數 `BACKEND_PORT/FRONTEND_PORT`（只接受 ASCII 十進位，否則退回預設並警告）> 預設 8000/5173；stop 為 參數 > `scripts/.running-ports.json`（實際執行中服務的事實來源，與環境變數不同時會警告）> 環境變數 > 預設；超出 1~65535 或同埠報錯
+- 啟動前檢查在啟動任何**服務**之前完成（venv / npm install 仍可能先執行）：埠被本專案服務占用則沿用（後端：命令列以 token 邊界含 `backend.main:app`，刻意不比對路徑以涵蓋跑錯環境的 uvicorn；前端：命令列含 `vite` 且在專案路徑下），被其他程式占用則報錯；「前端沿用但後端是新啟動」視為配對不明而報錯；記錄中的另一組服務仍在執行且埠不同也報錯
+- 就緒等待為單一總時限（`-WaitLimitSeconds`，預設 90），同時輪詢 `/health` 與前端 `/`（各試 127.0.0.1 與 [::1]）；本次啟動的服務視窗底下已無子程序（排除 conhost.exe）即立即失敗，沿用的服務若不再監聽也立即失敗；就緒後進入**配對階段**（獨立時限：剩餘時限與 10 秒取大者），重試比對「直連後端」與「經前端 proxy」的 `/health` `instance_id`；不一致時隔 1 秒再取樣一次，連續兩次不同才判 mismatch（避免 `--reload` 重啟瞬間誤判）；取不到則 unreachable；兩者皆失敗並清理
+- `instance_id` 由 `main.py` 的 `resolve_instance_id()` 決定：環境變數 `KENBURNS_INSTANCE_ID` 優先（`start.ps1` 啟動後端前會設定，讓 `--workers N` 的所有 worker 共用），否則每個 worker 各自產生；手動以 `--workers 4` 啟動且未設該變數的後端被沿用時，配對可能因落到不同 worker 而失敗，錯誤訊息會提示
+- 失敗清理只針對本次以 `-PassThru` 記錄、且命令列仍符合錨定樣式 `<cmd.exe> /k title Auto-KenBurns Backend/Frontend :<port> && ` 的 cmd 視窗；不動記錄檔；失敗訊息會帶出可直接執行的 `stop.bat -BackendPort X -FrontendPort Y`
+- 記錄檔寫入：同目錄唯一暫存檔 → 既有檔以 `[IO.File]::Replace`（Win32 ReplaceFile，原子）取代，失敗（唯讀、被其他 handle 開著）退回 `Move-Item -Force` 並重試 3 次、首次建立以 rename 搬入；寫入失敗時**不拆掉**已驗證健康的服務，只印停止指令並以非零碼結束
+- `stop.bat` 只結束通過同一身分驗證的程序，跳過 PID <= 4，檢查 taskkill 退出碼與停止後埠狀態；關窗改以 cmd 命令列比對而非視窗標題；有任何失敗則保留記錄並以非零碼結束，只在停的就是記錄那組時刪除記錄
+- 前端的 `/health`、`/api`、`/ws`、`/uploads`、`/output` 在 dev 與 preview 都走 Vite proxy（preview 用獨立的 `PREVIEW_PORT`，預設 4173，避免殘留的 preview 被當成可沿用的前端）（目標 `127.0.0.1:${BACKEND_PORT}`，`vite.config.ts` 會驗證埠範圍）；WebSocket 預設同源 `ws://${location.host}`，只有設定 `VITE_WS_URL` / `VITE_API_URL` 才直連
+- `npm run type-check` 同時檢查 `tsconfig.node.json`（`@types/node` 已為 devDependency）
+
+**啟用 venv 的 shell 差異**：`source venv/Scripts/activate` 只在 Git Bash 有效；PowerShell 必須用
+`.\backend\venv\Scripts\Activate.ps1`。venv 未生效時 `uvicorn` 會解析到 Anaconda 的版本，
+該環境沒有 `imgutils`，臉部偵測會靜默退回只認正面臉的 `lbpcascade_animeface`。
+
 ### Backend
 
 ```bash
@@ -42,7 +62,8 @@ cd backend
 
 # 建立虛擬環境（推薦）
 python -m venv venv
-source venv/Scripts/activate  # Windows
+source venv/Scripts/activate      # Windows Git Bash
+.\venv\Scripts\Activate.ps1       # Windows PowerShell
 
 # 安裝依賴
 pip install -r requirements.txt
@@ -80,8 +101,8 @@ Frontend runs at http://localhost:5173 with API proxy to backend.
 # Frontend
 cd frontend && npm run build
 
-# Backend (with production server)
-uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
+# Backend (with production server, run from project root)
+uvicorn backend.main:app --host 0.0.0.0 --port 8000 --workers 4
 ```
 
 ## Key Technologies
@@ -99,7 +120,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
 ```bash
 # 後端測試
 cd backend
-source venv/Scripts/activate
+source venv/Scripts/activate      # Git Bash；PowerShell 改用 .\venv\Scripts\Activate.ps1
 python -m pytest tests/ -v
 
 # 前端測試
@@ -111,9 +132,9 @@ npm run test
 
 | 類別 | 數量 |
 |------|------|
-| 後端測試 | 181 |
+| 後端測試 | 187 |
 | 前端測試 | 18 |
-| **總計** | **199** |
+| **總計** | **205** |
 
 ## Important Design Notes
 
